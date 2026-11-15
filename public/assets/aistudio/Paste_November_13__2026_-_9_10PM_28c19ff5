@@ -1,0 +1,191 @@
+Etsy Invitation Editor – Master Build Prompt (v3: Auto-Detecting Engine)
+Paste everything below into Google AI Studio Build mode. What is new in v3: one-file templates (a single design.svg), an engine that detects text, colors, layers and photo slots by itself, a richer typography and color toolkit with smart suggestions, a built-in dummy design for testing, and a dev-only inspector.
+PROJECT: AUTO-DETECTING UNIVERSAL INVITATION EDITOR
+Act as a senior frontend engineer, UI/UX designer, typography specialist, SVG rendering expert and product architect.
+Build a premium, commercially usable invitation customization website for a business that sells editable digital invitations on Etsy. This is a real product, not a student project, dashboard or landing page. Right now we are in testing mode with a dummy design. Later, real Etsy designs will be dropped in without code changes.
+1. Business model and customer journey
+1.  A customer buys a digital invitation on Etsy.
+2.  Etsy delivers a PDF with one unique URL, for example https://ourwebsite.netlify.app/editor/wildflower-001.
+3.  The customer opens it. The site loads only that one design.
+4.  They type their details, see a live preview, restyle what the design allows, and download a print-ready PDF or PNG.
+No account, no login, no technical knowledge. Many customers use phones, so mobile is first-class.
+2. Core principle: ONE ENGINE, AUTO-DETECTION, ZERO DESIGN-SPECIFIC CODE
+Every design is different (fields, positions, fonts, colors, size, orientation). Therefore:
+• A template is ONE file: design.svg. The engine reads the SVG and detects everything editable by itself.
+• config.json is optional. If present, it only overrides or refines what was detected (labels, limits, allowed fonts). A template with no config must still work.
+• Nothing in src/ may mention a specific design. Adding a design = drop in a folder with design.svg, run the inspector, deploy. If an ordinary design needs a code change, that is an engine bug: fix the engine.
+• The edit panel is generated from what was detected. Controls for things the design does not contain never appear.
+3. NO template gallery
+This is not a marketplace. Do not build a template gallery, library, "change template" button, public template registry, or any code that fetches more than the requested template.
+• /editor/:templateId is the only real customer page.
+• / shows a neutral page: logo and "Please open the personal link from your Etsy instruction PDF." plus a Help link. No design previews.
+• Unknown IDs show a friendly Not Found page that does not list other templates.
+• Add <meta name="robots" content="noindex">.
+• The only exception is the dev-only inspector (section 9), available only in development builds or with an explicit build flag, never in production.
+4. Technology stack
+• React + Vite (JavaScript), React Router, modern CSS. No backend, no database, no accounts, no payments, no paid services.
+• Hosting Netlify Free, source GitHub, built in Google AI Studio Build mode.
+• Storage: browser localStorage only.
+• Add libraries only when needed and explain each: jspdf + svg2pdf.js (vector PDF), native canvas for PNG/JPG (use html-to-image only if native proves unreliable), fonts via @fontsource/* (open-licensed, bundled locally; no runtime font CDN).
+• If AI Studio cannot run the exact Vite setup, state the limitation and keep a Vite-compatible structure.
+5. Folder structure
+public/templates/<templateId>/design.svg        (required, the only required file)
+public/templates/<templateId>/config.json      (optional overrides)
+public/templates/<templateId>/preview.webp     (optional, for Etsy listing only, never shown in the app)
+scripts/inspect-templates.js                    (detection report + validation)
+src/
+  components/ Editor/ Toolbar/ Panels/ (Text, Typography, Colors, Layers, Photos, Size, Export)
+              InvitationCanvas/ Suggestions/ HelpModal/ states/ DevInspector/ (dev only)
+  pages/ EditorPage.jsx, HomePage.jsx, NotFoundPage.jsx
+  engine/ detectTemplate.js, detectText.js, detectColors.js, detectLayers.js, detectPhotos.js,
+          applyOverrides.js, sanitizeSvg.js, textLayout.js, palettes.js, pairings.js, contrast.js, sizePresets.js
+  hooks/ useTemplate.js, useEditorState.js, useHistory.js, useLocalStorage.js
+  services/ templateLoader.js, fontLoader.js, serializeSvg.js, exportPDF.js, exportRaster.js
+  styles/ design-system.css, global.css, editor.css
+netlify.toml, package.json, README.md, TEMPLATE_GUIDE.md
+No giant single component.
+6. THE DETECTION ENGINE (most important)
+Loading pipeline: read templateId from the URL; validate against ^[a-z0-9]+(-[a-z0-9]+)*$ (max 60 chars) before building any path; fetch only /templates/<id>/design.svg (and config.json if it exists, a 404 on config is normal); sanitize the SVG; parse it with DOMParser; run detection; inject the SVG inline; wait for fonts; render.
+6.1 What the engine must detect
+A. Canvas and size
+• Read viewBox as the coordinate source of truth.
+• Print size from root attributes data-print-width / data-print-height (inches), else infer the closest common size by aspect ratio (5×7, 4×6, 5×5, 7×5, 6×4, A5, A6). Landscape and square must work.
+• Offer other sizes with the same aspect ratio as a size selector, with a plain note if aspect ratios differ.
+B. Editable text
+• Every <text> carrying data-editable is a field. Attributes read when present: id, data-label, data-group, data-max (max characters), data-required, data-placeholder, data-min-size, data-max-size, data-lock (list of locked controls, for example font,color), data-case (upper/lower/title), data-lines (max lines), data-zone-width, data-type (text, textarea, date, time).
+• Fallback: if the SVG has no data-editable anywhere, treat every <text> element as editable and generate sensible labels from the ID or the default content. Show a warning in the inspector.
+• Read position (x, y, transform), text-anchor, font-family, font-size, font-weight, font-style, fill, letter-spacing, <tspan> lines and rotation. Preserve all of them when re-rendering.
+• Multi-line: <tspan> children become a multi-line text area, wrapped inside the zone.
+• Group fields automatically using data-group, else by ID prefix (venue_name, venue_address → "Venue"), else "Details".
+• Text that is not marked editable stays fixed (for example "Together with their families") unless the fallback applies.
+C. Colors (auto color palette)
+• Scan all fill, stroke, stop-color and inline style colors of non-text artwork. Normalize to hex, merge near-identical colors (distance threshold), ignore none, currentColor and url(#id) references (but read gradient stops).
+• Each unique color becomes a swatch in a "Design colors" panel, named by data-color-role / data-color-label if present, else auto-named ("Main gold", "Soft blush", "Leaf green") from hue and lightness.
+• Changing a swatch recolors every element that used it (global replace), including gradient stops and strokes.
+• Provide: per-swatch reset, "reset all colors", and the background color as its own swatch when the background is a single rect or data-background.
+• Limit to the 8 most-used colors, with a "More colors" expander for the rest.
+• data-lock-color on an element or group excludes it from recoloring.
+D. Layers
+• Any <g data-layer="florals" data-label="Floral corners"> or <g id="layer-..."> becomes a show/hide toggle. If a design has no layers, no Layers panel appears.
+• Optional data-layer-group="frame" makes layers mutually exclusive (pick 1 of N frame styles).
+E. Photo slots (optional feature)
+• <image data-photo-slot data-label="Couple photo"> or a <rect data-photo-slot> becomes an upload slot. The photo stays in the browser (never uploaded), fits with object-fit cover/contain, with a basic zoom and reposition control, and is embedded in exports.
+• If the design has no photo slots, no photo controls appear.
+F. Fonts
+• Detect all font-family values used. Map them to the bundled supported list. Unknown fonts: show a clear warning in the inspector and fall back to the nearest supported font, never silently.
+G. Optional config.json overrides
+• Same IDs as the SVG. It can add labels, limits, allowed fonts, font pairings, palettes, grouping, required flags and export filename. Detected values are the default; config only overrides. Validate config with a clear schema and ignore unknown keys safely.
+6.2 Safety, conventions and error handling
+• Sanitize SVG before use: remove <script>, <foreignObject>, on* attributes, external href/xlink:href (allow only internal #id and embedded data:image/ for photos), javascript: URLs, and external CSS @import. Never use dangerouslySetInnerHTML for customer text.
+• Escape all customer text. Never silently delete customer text: shrink to a minimum size, then warn.
+• Corrupt or non-SVG file: friendly Invalid Template state; log details to the console only.
+7. EDITOR OPTIONS (rich, but calm and uncluttered)
+Generate controls only for detected capabilities. Use progressive disclosure: a clean "Basics" view first, with an "Advanced" expander per section.
+7.1 Text and typography (per field)
+• Text input (single or multi-line), live character counter, required marker, helpful placeholder.
+• Font picker with live font previews, grouped as Serif, Sans, Script, and searchable. Only show fonts the design allows (default: the full supported list).
+• Size slider with number input, min/max from the design (auto-fit shrink-to-fit above the minimum).
+• Weight and italic (only when the font has those styles), letter spacing, line height, text case (Aa, AA, aa), alignment (left, center, right), rotation (if allowed), text color (swatch row of design colors + custom picker + hex input).
+• Per-field "reset to original" and a "copy this style to other fields" action.
+• Click a text element in the preview to jump to its field; focus a field to highlight its text in the preview.
+• Drag to move text on the canvas (pointer events, touch-friendly), with center and alignment snap guides, arrow-key nudge (1px, Shift = 10px), and limits so text stays inside the safe area.
+7.2 Smart suggestions ("ready to use" good defaults)
+The customer should be able to get a beautiful result in 3 clicks without design skill.
+1.  Font pairing suggestions: a "Suggested pairings" row of one-click presets that restyle all text at once (heading font + body font), for example: Great Vibes + Cormorant Garamond (romantic), Playfair Display + DM Sans (modern classic), Libre Baskerville + Montserrat (minimal), Cormorant Garamond + Lora (botanical), Allura + Lato (soft script), Parisienne + Raleway (airy). Each preset shows a live mini-preview of the actual invitation text.
+2.  Palette suggestions: a "Suggested palettes" row generated from the design's own colors (monochrome, analogous, complementary, softer, darker) plus a curated set of wedding/event palettes: Blush & Sage, Navy & Gold, Dusty Rose, Terracotta, Emerald & Ivory, Lavender Mist, Black & Gold, Classic Neutral. One click maps the palette onto the detected swatches by role and lightness (darkest to darkest, lightest to lightest).
+3.  Quick Styles: each combines one font pairing + one palette, for example "Romantic Blush", "Modern Minimal", "Classic Gold", "Garden Sage". One click applies both. A "Surprise me" button picks a good combination at random (never an unreadable one).
+4.  Contrast and readability coach: compute WCAG contrast between each text color and the background behind it. If it falls below 4.5:1 (3:1 for text above ~24px equivalent), show a gentle inline suggestion with a one-click fix ("Use a darker shade"). Warn when text is too small for print (below ~9pt at final size), and when a line is shrunk or truncated.
+5.  Layout health hints: warn when text leaves the safe margin, overlaps other text, or crosses the border area, with a "Fix automatically" action when possible.
+All suggestions must be deterministic and run locally. No AI API, no network.
+7.3 Workspace and tools
+• Top bar: design name, Undo, Redo, Reset all, Compare with original (hold to see the original), saved-state indicator, Help, Download.
+• Preview: zoom in/out, percentage, Fit, pan when zoomed (drag/pinch), toggleable safe-area guide and bleed/trim guide (for print preparation), optional grid.
+• Keyboard shortcuts (desktop): Undo/Redo, arrow nudge, zoom, ? to show shortcuts.
+• Panels: Details, Typography, Colors, Layers, Photos, Size, Download. Hide any that do not apply.
+7.4 Export options
+• Format: PDF (vector), PNG, JPG. Size selector (from section 6.1A). DPI (150/300/600 for raster, default 300).
+• Optional bleed (0.125 in) and crop marks for PDF, off by default with a short plain explanation.
+• Transparent PNG only if the design has no background (data-allow-transparent).
+• Filenames like Wildflower-Wedding-Customized.pdf. Make PNG/JPG and PDF share one pixel-accurate render path so they always match the preview.
+8. Interface design direction
+Elegant editorial minimalism: refined, calm, trustworthy, like a high-end stationery studio. Not a SaaS admin panel.
+Avoid: generic AI-dashboard look, heavy gradients, card-in-card layouts, cartoon art, oversized buttons, cluttered toolbars, decorative animation.
+Light tokens: background #F7F5F0, secondary #EFEBE3, text #28251F, secondary text #6F6858, accent #8F6F4E, border #E6E0D6, restrained accessible green and red. Dark tokens (theme toggle, default to system): background #12100D, panel #1C1915, text #EEE7D8, secondary #A89F8C, accent #D2AE72, border #2E2A23. The invitation preview workspace stays neutral in both themes.
+Use a 4/8px spacing system, subtle borders, restrained shadows, WCAG AA contrast (4.5:1) in both themes, touch targets at least 44px, and real <button>, <label>, <input> elements with aria-label on icon-only buttons. App font: DM Sans (page title 28–32px, section title 18–22px, labels 12–14px, inputs 14–16px with 16px minimum on mobile, buttons 14–15px, helper text 12–13px).
+Layout
+• Desktop: left panel (generated controls, collapsible sections), center preview, top bar, right or bottom export area. No template list, no "change template" button.
+• Mobile: sticky collapsible preview on top, controls below as collapsible sections, bottom action bar with Download, pinch/button zoom, no horizontal overflow at 320px.
+9. Dummy designs for testing (build these NOW)
+Build two intentionally different dummy templates, each a single design.svg with data-editable tags and no config, so detection is truly tested:
+1.  demo-001 – "Dummy Wedding" (5×7 portrait, 1500×2100): simple botanical-style artwork drawn with SVG shapes (a border, leaf and flower corners, a divider line), 8 editable texts (couple names, date, time, venue name, venue address, RSVP, a short invitation line, a footer line in a multi-line tspan), 5 distinct artwork colors, 3 toggleable layers (florals, border, divider), one optional photo slot, and data-group values for Names, Date & Time, Venue, RSVP.
+2.  demo-002 – "Dummy Birthday" (landscape 7×5, 2100×1500): bold geometric artwork, different fonts and colors, 5 editable texts, 4 colors, 1 layer set with mutually exclusive frame styles, no photo slot.
+Both are clearly marked as demo (data-demo="true" on the root, a small "Demo design" ribbon inside the editor, never inside the exported file). Both must work with zero design-specific code.
+Demo vs production: add an environment flag VITE_INCLUDE_DEMO. When false, the build removes every template whose root has data-demo="true" from dist/. Document this in the README under "Before launching to Etsy".
+Dev-only inspector
+Available at /__inspect/:templateId only when import.meta.env.DEV is true or VITE_ENABLE_INSPECTOR=true. Show for any template: detected canvas size, detected fields (id, label, group, font, size, color, limits), detected colors (swatches with usage counts), layers, photo slots, fonts used (supported or not), warnings (missing labels, unsupported fonts, text outside the safe area, tiny text), and a side-by-side raw SVG vs rendered preview. The inspector must not exist in production builds and must not expose a list of all templates in production.
+Also create npm run inspect-templates: a Node script that prints the same detection report for every folder in public/templates/, plus pass/fail checks (ID format matches folder name, viewBox exists, no unsafe SVG content, fonts supported, at least one editable text). Run it automatically before npm run build.
+10. Local auto-save
+• Key per design: invitation-editor:v2:<templateId>.
+• Save text, fonts, sizes, spacing, colors (swatch map), alignment, positions, layer choices, size selection, and photo slot positions (not the photo data unless it is small; if saving a photo fails, warn politely).
+• Store a designHash (hash of the SVG's detected structure). If the seller later updates a design, migrate matching IDs, drop unknown ones, and never crash.
+• Show "Saved on this device". Never claim cloud saving or cross-device sync. If localStorage is unavailable, keep working and show a clear warning.
+• "Reset to original" with confirmation clears only that template's key.
+• Undo/redo: minimum 50 steps with debounced typing, covering text, font, color, position, layers and size.
+11. PDF and PNG/JPG export (critical)
+• PDF: vector via jspdf + svg2pdf.js using the real SVG artwork and rendered text, never an editor screenshot. Page size equals the chosen physical size (landscape supported). Fonts embedded, positions identical to the preview. If a vector PDF cannot render some SVG feature, fall back to a 300 DPI raster for that case and report it.
+• PNG/JPG: render the serialized SVG (fonts embedded as data URIs) to a canvas at printWidth × dpi by printHeight × dpi (5×7 in → 1500×2100). Respect device canvas limits; on low-memory phones fall back to a lower scale and tell the customer.
+• Block exporting until all fonts are loaded (document.fonts.load for every font and weight in use). Prevent font substitution. If a font cannot be embedded, show a clear error rather than exporting wrong typography.
+• Hide guides, demo ribbon and every editor UI from exports. Handle interrupted downloads gracefully.
+12. Invitation typography
+Supported fonts (all open-licensed, bundled locally through @fontsource): Serif: Cormorant Garamond, Playfair Display, Libre Baskerville, Lora. Sans: DM Sans, Montserrat, Lato, Raleway. Script: Great Vibes, Allura, Parisienne. Keep the font list in one file (fonts.js) with category, weights and pairing tags so adding a font is a small change. Do not use script fonts for every line. Verify each font's license in the README.
+13. States, help and accessibility
+Professional, friendly states with no stack traces: loading skeleton, template not found, invalid or unsafe SVG, no editable text detected, font load failure, export failure with retry, storage unavailable, unsupported browser, missing required details, slow connection.
+Help modal with four short steps: Edit details, Preview, Download, Print (recommend 300 DPI, original size, and a note to check the print shop's bleed requirements). Respect prefers-reduced-motion. All controls must be keyboard reachable with visible focus rings.
+14. Security and reliability
+• Same-origin trusted templates only, no external URLs, no arbitrary path building.
+• No API keys, no personal-data analytics. Customer text and photos never leave the browser.
+• Public files are public. A template URL identifies a design; it does not prove an Etsy purchase. Do not fake purchase verification. In the README recommend non-guessable IDs such as wildflower-001-k7x9q2.
+15. Performance
+Fetch only the requested template. Lazy-load export libraries on the first Download click. Memoize so typing in one field re-renders only that text element. Keep the main bundle small. Document an SVGO workflow for lean SVGs (without breaking data-* attributes or IDs).
+16. Deployment
+• Scripts: dev, build, preview, inspect-templates.
+• netlify.toml: SPA fallback (/* → /index.html, status 200), long cache for hashed assets, short cache for /templates/*.
+• No localhost URLs, no secrets, correct base paths.
+• README.md and TEMPLATE_GUIDE.md. The guide must explain, with a copy-paste prompt for Claude, how to create a new design: "make design.svg only, viewBox 0 0 1500 2100, artwork + text with data-editable, data-label, data-group, data-max, name colors with data-color-label, wrap optional decoration in <g data-layer>". Include a checklist: create folder, add SVG, run inspector, test on phone, deploy, paste URL into the Etsy PDF.
+17. Working method
+Do not build everything in one step. Before any code, present: the architecture, final folder structure, libraries and why, design and typography systems, the detection rules and SVG conventions, any technical conflicts (for example: vector PDF vs font embedding, svg2pdf limitations, iOS canvas size limits, recolor edge cases with gradients and CSS classes), and the phase plan. Do not ask questions unless truly blocked; pick sensible defaults and state them.
+• Phase 1: project setup, routing, design system (light/dark), Home and Not Found pages.
+• Phase 2: SVG loader, sanitizer, detection engine (canvas, text, colors, layers, photos, fonts), optional config overrides.
+• Phase 3: dummy designs demo-001 and demo-002, inspector script and dev-only inspector page.
+• Phase 4: editor shell (desktop and mobile), canvas with zoom, fit, pan, guides.
+• Phase 5: auto-generated panels: text, typography, colors, layers, photos, size.
+• Phase 6: smart suggestions (pairings, palettes, quick styles, Surprise me, contrast coach, layout hints), click and drag to edit on canvas.
+• Phase 7: auto-save, undo/redo, reset, compare with original, design-hash migration.
+• Phase 8: PDF, PNG and JPG export, bleed and crop marks.
+• Phase 9: mobile polish, help modal, accessibility, full testing, README and TEMPLATE_GUIDE, Netlify preparation, demo-removal flag.
+At the end of each phase: what was implemented, files created or modified, exactly what was tested and how, remaining issues. Preserve working features, do not rewrite working files unnecessarily, leave no placeholders where features were requested, and never claim something works unless you ran and verified it. Say clearly what you could not test (for example a real phone).
+18. Acceptance tests (all must pass)
+1.  /editor/demo-001 loads only that design; /editor/demo-002 loads a visibly different landscape design.
+2.  Neither demo has a config.json, and both work fully.
+3.  The inspector (dev) shows correct detected fields, colors, layers, photo slots and fonts for both.
+4.  Editing text updates the preview immediately.
+5.  Font, size, weight, spacing, case, alignment and color changes update only where allowed.
+6.  Changing one color swatch recolors every matching element, including strokes and gradient stops.
+7.  Layer toggles and mutually exclusive frames work; a design with no layers shows no Layers panel.
+8.  demo-002 shows no photo controls; demo-001 photo upload works and stays in the browser.
+9.  Font pairing, palette and Quick Style suggestions apply in one click; "Surprise me" never produces an unreadable result.
+10.  Contrast coach warns on a deliberately low-contrast color and its one-click fix works.
+11.  Click-to-select and drag text with snapping works with mouse and touch.
+12.  Long text shrinks to the minimum, then warns, and is never silently deleted.
+13.  Refresh restores edits; Reset restores the original; Undo/Redo covers all change types; Compare shows the original.
+14.  PNG has exact pixels (5×7 in → 1500×2100); PDF has exact physical size, embedded fonts and vector artwork; both match the preview; no guides, demo ribbon or UI appear in exports.
+15.  An invalid ID shows the friendly Not Found page with no template list. A direct URL works in a fresh browser (SPA fallback).
+16.  Mobile at 320–430px: no horizontal scroll, usable controls, easy download.
+17.  The network tab shows only the requested template's files being fetched.
+18.  New design test: add a third template (a copy of a demo with changed text, colors and layers) and confirm it works with zero changes in src/.
+19.  An SVG with a <script> or external image is sanitized or rejected, and the inspector script flags it.
+20.  With VITE_INCLUDE_DEMO=false, the production build contains no demo templates and no inspector.
+21.  Light and dark themes both meet contrast requirements.
+19. Final instructions
+The customer-facing editor is the product. Prioritize excellent visual design, professional typography, accurate rendering, reliable exports, the smart color and typography suggestions, a truly auto-detecting reusable engine, speed, mobile usability and free infrastructure. Do not overengineer, and do not add admin dashboards, analytics pages, accounts, payments or a template gallery.
+FIRST ACTION: present your analysis (architecture, folder structure, libraries, detection rules, design and typography systems, conflicts, phases), then begin Phase 1.

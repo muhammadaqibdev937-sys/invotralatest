@@ -1,0 +1,27 @@
+:root,
+.dark {
+  color-scheme: dark;
+  --ea-bg-main: #090909;
+  --ea-bg-secondary: #101010;
+  --ea-bg-surface: #151515;
+  --ea-bg-input: #0D0D0D;
+  --ea-bg-workspace: #090909;
+  --ea-text-primary: #F5F5F5;
+  --ea-text-secondary: #999999;
+  --ea-text-muted: #737373;
+  --ea-accent: #C0C0C0;
+  --ea-accent-hover: #252525;
+  --ea-accent-active: #E5E5E5;
+  --ea-accent-contrast: #090909;
+  --ea-accent-soft: #252525;
+  --ea-border: #292929;
+  --ea-border-strong: #3A3A3A;
+  --ea-success: #E5E5E5;
+  --ea-success-soft: #252525;
+  --ea-error: #E5E5E5;
+  --ea-error-soft: #151515;
+  --ea-notice: #C0C0C0;
+  --ea-notice-soft: #151515;
+  --ea-shadow-paper: 0 28px 64px -16px rgba(0, 0, 0, 0.85), 0 6px 20px -4px rgba(0, 0, 0, 0.65);
+  --ea-shadow-float: 0 12px 32px -8px rgba(0, 0, 0, 0.8);
+}
