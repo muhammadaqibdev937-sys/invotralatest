@@ -23,15 +23,18 @@ import {
   X,
 } from 'lucide-react';
 import { ClearConfirmModal } from '../components/Editor/ClearConfirmModal';
+import { EditorDiagnosticFooter } from '../components/Editor/EditorDiagnosticFooter';
 import { ResetConfirmModal } from '../components/Editor/ResetConfirmModal';
 import { ExportPanel } from '../components/ExportPanel/ExportPanel';
 import { FieldPanel, NavSectionId } from '../components/FieldPanel/FieldPanel';
 import { FontFamilyDropdown } from '../components/FontPicker/FontFamilyDropdown';
+import { FontUploadModal } from '../components/FontPicker/FontUploadModal';
 import { GoogleFontsPicker } from '../components/FontPicker/GoogleFontsPicker';
 import { HelpModal } from '../components/HelpModal/HelpModal';
 import { InvitationCanvas } from '../components/InvitationCanvas/InvitationCanvas';
 import { RightInspector } from '../components/RightInspector/RightInspector';
 import { EditorTopBar } from '../components/Toolbar/EditorTopBar';
+import { clearFontAvailabilityCache } from '../engine/fonts';
 import { LoadedTemplateV1, TextAnchor } from '../engine/schema';
 import {
   AlignMode,
@@ -47,15 +50,21 @@ import {
   collectAllNodes,
   collectTextNodesWithAncestors,
   createNewTextNode,
+  estimateNodeLocalCenter,
   findNodeWithAncestors,
   getEffectiveNodeProp,
   getTextNodeProperties,
   normalizeColorToHex,
+  resolveTransformPivotPatch,
+  scanSceneFontUsage,
   SvgSceneNode,
   SvgTransformState,
+  TextEditPatch,
 } from '../engine/svgScene';
 import { useEditorState } from '../hooks/useEditorState';
+import { usePersistedUploadedFonts } from '../hooks/usePersistedUploadedFonts';
 import { useTheme } from '../hooks/useTheme';
+import { ensureFontsLoaded, getFontDefinition } from '../services/fontLoader';
 
 
 function isTypingElement(target: EventTarget | null): boolean {
@@ -112,9 +121,15 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
     undo,
     redo,
     resetToOriginal,
+    commitUndoBoundary,
   } = useEditorState(template);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const handleSelectNodes = useCallback((ids: string[]) => {
+    setSelectedIds((prev) =>
+      prev.length === ids.length && prev.every((v, i) => v === ids[i]) ? prev : ids
+    );
+  }, []);
   const [clipboardNodes, setClipboardNodes] = useState<SvgSceneNode[]>([]);
   const [toolMode, setToolMode] = useState<'select' | 'pan'>('select');
   const [isPreviewMode, setIsPreviewMode] = useState(false);
@@ -130,6 +145,13 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
   const [isFontPickerModalOpen, setIsFontPickerModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [mobilePreviewCollapsed, setMobilePreviewCollapsed] = useState(false);
+  const [fontUploadModal, setFontUploadModal] = useState<{
+    open: boolean;
+    preferredMissingFont?: string;
+  }>({ open: false });
+  const [fontRegistryVersion, setFontRegistryVersion] = useState(0);
+  const { fontRegistryVersion: persistedFontVersion } = usePersistedUploadedFonts();
+  const effectiveFontRegistryVersion = fontRegistryVersion + persistedFontVersion;
 
   const boxReadersRef = useRef<Set<(ids: string[]) => Record<string, RectBox>>>(new Set());
   const registerBoxReader = useCallback(
@@ -149,6 +171,18 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
     }
     return {};
   }, []);
+
+  const pivotReadersRef = useRef<Set<(id: string) => { x: number; y: number } | null>>(new Set());
+  const registerPivotReader = useCallback(
+    (reader: (id: string) => { x: number; y: number } | null) => {
+      pivotReadersRef.current.add(reader);
+      return () => {
+        pivotReadersRef.current.delete(reader);
+      };
+    },
+    []
+  );
+
 
   // Select initial element when loading a new SVG
   useEffect(() => {
@@ -182,12 +216,54 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
 
   const scene = docState?.scene ?? null;
 
+  const readNodeLocalPivot = useCallback(
+    (node: SvgSceneNode): { x: number; y: number } | null => {
+      for (const reader of pivotReadersRef.current) {
+        const res = reader(node.id);
+        if (res) return res;
+      }
+      if (!scene) return null;
+      return estimateNodeLocalCenter(node, scene);
+    },
+    [scene]
+  );
+
   const textEntries = useMemo(
     () => (scene ? collectTextNodesWithAncestors(scene.nodes) : []),
     [scene]
   );
 
+  // Ensure all active bundled and automatic fallback preview fonts are loaded (debounced during rapid typing)
+  useEffect(() => {
+    if (!scene || textEntries.length === 0) return;
+    const timer = window.setTimeout(() => {
+      const reqs: Array<{ family: string; weight: string; style: 'normal' | 'italic' }> = [];
+      for (const { node, ancestors } of textEntries) {
+        const p = getTextNodeProperties(node, scene.cssRules, ancestors);
+        const def =
+          getFontDefinition(p.fontFamily) ??
+          (p.isFontFallback ? getFontDefinition(p.fallbackPreviewFamily) : undefined);
+        if (def) {
+          reqs.push({ family: def.family, weight: p.fontWeight, style: p.fontStyle });
+        }
+      }
+      if (reqs.length > 0) {
+        void ensureFontsLoaded(reqs).catch((err) => {
+          console.warn('[EditorPage] Font preload warning:', err);
+        });
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [scene, textEntries]);
+
   const primaryId = selectedIds[0] ?? null;
+  const prevPrimaryIdRef = useRef<string | null>(primaryId);
+  useEffect(() => {
+    if (prevPrimaryIdRef.current !== primaryId) {
+      prevPrimaryIdRef.current = primaryId;
+      commitUndoBoundary();
+    }
+  }, [primaryId, commitUndoBoundary]);
   const primaryInfo = useMemo(
     () => (scene && primaryId ? findNodeWithAncestors(scene.nodes, primaryId) : null),
     [scene, primaryId]
@@ -199,7 +275,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
       scene && primaryInfo && primaryInfo.node.tag === 'text'
         ? getTextNodeProperties(primaryInfo.node, scene.cssRules, primaryInfo.ancestors)
         : null,
-    [scene, primaryInfo]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene, primaryInfo, effectiveFontRegistryVersion]
   );
 
   const handleAddTextPreset = (preset: 'heading' | 'subheading' | 'body') => {
@@ -374,18 +451,16 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
       if (!scene) return;
       const node = findNodeWithAncestors(scene.nodes, nodeId)?.node;
       if (!node || node.locked) return;
-      const box = readCanvasBoxes([nodeId])[nodeId];
-      const pivotX = node.transform.pivotX ?? (box ? box.centerX - node.transform.tx : undefined);
-      const pivotY = node.transform.pivotY ?? (box ? box.centerY - node.transform.ty : undefined);
+      const localCenter = readNodeLocalPivot(node) ?? estimateNodeLocalCenter(node, scene);
+      const pivotPatch = resolveTransformPivotPatch(node, localCenter);
       updateNodeTransform(nodeId, {
-        pivotX,
-        pivotY,
+        ...pivotPatch,
         ...(axis === 'x'
           ? { scaleX: -node.transform.scaleX }
           : { scaleY: -node.transform.scaleY }),
       });
     },
-    [scene, readCanvasBoxes, updateNodeTransform]
+    [scene, readNodeLocalPivot, updateNodeTransform]
   );
 
   const handleRotateStep = useCallback(
@@ -393,19 +468,38 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
       if (!scene) return;
       const node = findNodeWithAncestors(scene.nodes, nodeId)?.node;
       if (!node || node.locked) return;
-      const box = readCanvasBoxes([nodeId])[nodeId];
-      const pivotX = node.transform.pivotX ?? (box ? box.centerX - node.transform.tx : undefined);
-      const pivotY = node.transform.pivotY ?? (box ? box.centerY - node.transform.ty : undefined);
+      const localCenter = readNodeLocalPivot(node) ?? estimateNodeLocalCenter(node, scene);
+      const pivotPatch = resolveTransformPivotPatch(node, localCenter);
       let nextRot = node.transform.rotation + deltaDeg;
       while (nextRot > 180) nextRot -= 360;
       while (nextRot < -180) nextRot += 360;
       updateNodeTransform(nodeId, {
-        pivotX,
-        pivotY,
+        ...pivotPatch,
         rotation: Math.round(nextRot * 10) / 10,
       });
     },
-    [scene, readCanvasBoxes, updateNodeTransform]
+    [scene, readNodeLocalPivot, updateNodeTransform]
+  );
+
+  const handleInspectorTransformUpdate = useCallback(
+    (nodeId: string, patch: Partial<SvgTransformState>, coalesce = false) => {
+      if (
+        scene &&
+        !('pivotX' in patch) &&
+        !('pivotY' in patch) &&
+        (patch.scaleX !== undefined || patch.scaleY !== undefined || patch.rotation !== undefined)
+      ) {
+        const node = findNodeWithAncestors(scene.nodes, nodeId)?.node;
+        if (node && (node.transform.pivotX === undefined || node.transform.pivotY === undefined)) {
+          const localCenter = readNodeLocalPivot(node) ?? estimateNodeLocalCenter(node, scene);
+          const pivotPatch = resolveTransformPivotPatch(node, localCenter);
+          updateNodeTransform(nodeId, { ...pivotPatch, ...patch }, coalesce);
+          return;
+        }
+      }
+      updateNodeTransform(nodeId, patch, coalesce);
+    },
+    [scene, readNodeLocalPivot, updateNodeTransform]
   );
 
   // Global keyboard shortcuts
@@ -544,8 +638,27 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
     onClearDesign(template.id);
   };
 
+  // Allow tapping outside inputs/textareas on mobile or desktop to close keyboard and finish editing
+  const handleRootPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    const activeTag = active.tagName.toLowerCase();
+    if (activeTag !== 'input' && activeTag !== 'textarea' && !active.isContentEditable) {
+      return;
+    }
+    const target = e.target as HTMLElement | null;
+    if (!target) return;
+    if (target === active || target.closest('input, textarea, select, [contenteditable="true"], button, a, label, [data-direct-text-editor="true"]')) {
+      return;
+    }
+    active.blur();
+  };
+
   return (
-    <div className="min-h-screen lg:h-screen lg:overflow-hidden flex flex-col bg-[#090909] text-[#F5F5F5]">
+    <div
+      onPointerDown={handleRootPointerDown}
+      className="min-h-screen lg:h-screen lg:overflow-hidden flex flex-col bg-[#F4F4F5] text-[#111111] dark:bg-[#090909] dark:text-[#F5F5F5]"
+    >
       <EditorTopBar
         templateName={template.name}
         saveStatus={saveStatus}
@@ -563,14 +676,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
       />
 
       {isPreviewMode && (
-        <div className="px-4 sm:px-6 py-1.5 border-b text-xs flex items-center justify-between gap-3 shrink-0 bg-[#151515] border-[#C0C0C0]/40 text-[#E5E5E5]">
+        <div className="px-4 sm:px-6 py-1.5 border-b text-xs flex items-center justify-between gap-3 shrink-0 bg-[#FAFAFA] border-[#D4D4D8] text-[#111111] dark:bg-[#151515] dark:border-[#C0C0C0]/40 dark:text-[#E5E5E5]">
           <span className="truncate">
             Preview Mode — viewing clean design without selection handles or guides.
           </span>
           <button
             type="button"
             onClick={() => setIsPreviewMode(false)}
-            className="px-2.5 py-1 rounded border border-[#E5E5E5] bg-[#E5E5E5] text-[#090909] font-semibold inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+            className="px-2.5 py-1 rounded border border-[#18181B] bg-[#18181B] text-white dark:border-[#E5E5E5] dark:bg-[#E5E5E5] dark:text-[#090909] font-semibold inline-flex items-center gap-1.5 cursor-pointer shrink-0"
           >
             <EyeOff className="w-3.5 h-3.5" />
             <span>Back to Editing</span>
@@ -579,7 +692,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
       )}
 
       {!isPreviewMode && restoredFromDraft && (
-        <div className="px-4 sm:px-6 py-1.5 border-b text-xs flex items-center justify-between gap-3 shrink-0 bg-[#151515] border-[#292929] text-[#E5E5E5]">
+        <div className="px-4 sm:px-6 py-1.5 border-b text-xs flex items-center justify-between gap-3 shrink-0 bg-[#FAFAFA] border-[#E4E4E7] text-[#111111] dark:bg-[#151515] dark:border-[#292929] dark:text-[#E5E5E5]">
           <p className="truncate">
             Saved draft restored automatically from this browser.
           </p>
@@ -587,7 +700,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
             <button
               type="button"
               onClick={() => setIsResetOpen(true)}
-              className="underline text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer transition-colors"
+              className="underline text-[#3F3F46] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer transition-colors"
             >
               Reset
             </button>
@@ -595,7 +708,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               type="button"
               onClick={dismissRestoredNotice}
               aria-label="Dismiss restored draft notice"
-              className="p-0.5 rounded hover:bg-[#252525] text-[#999999] hover:text-[#F5F5F5] cursor-pointer transition-colors"
+              className="p-0.5 rounded hover:bg-[#E4E4E7] dark:hover:bg-[#252525] text-[#52525B] hover:text-[#111111] dark:text-[#999999] dark:hover:text-[#F5F5F5] cursor-pointer transition-colors"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -604,8 +717,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
       )}
 
       {!storageAvailable && (
-        <div className="px-4 py-2 border-b text-xs flex items-center justify-center gap-2 shrink-0 bg-[#151515] border-[#292929] text-[#999999]">
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-[#C0C0C0]" />
+        <div className="px-4 py-2 border-b text-xs flex items-center justify-center gap-2 shrink-0 bg-[#FAFAFA] border-[#E4E4E7] text-[#52525B] dark:bg-[#151515] dark:border-[#292929] dark:text-[#999999]">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-[#3F3F46] dark:text-[#C0C0C0]" />
           <span>Browser storage unavailable. Download your SVG when finished.</span>
         </div>
       )}
@@ -615,7 +728,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
         {!isPreviewMode && (
           <aside
             aria-label="Studio Library"
-            className="w-[384px] border-r overflow-hidden shrink-0 bg-[#101010] border-[#292929]"
+            className="w-[384px] border-r overflow-hidden shrink-0 bg-white border-[#E4E4E7] dark:bg-[#101010] dark:border-[#292929]"
           >
             <FieldPanel
               scene={scene}
@@ -623,8 +736,9 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               selectedIds={selectedIds}
               activeNav={activeNav}
               onChangeNav={setActiveNav}
-              onSelectNodes={setSelectedIds}
+              onSelectNodes={handleSelectNodes}
               onUpdateTextNode={updateTextNode}
+              onCommitTextBoundary={commitUndoBoundary}
               onApplyBatchTextUpdates={applyBatchTextUpdates}
               onAddTextPreset={handleAddTextPreset}
               onInsertSceneNode={insertSceneNode}
@@ -641,6 +755,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               onSetBackgroundImage={setBackgroundImage}
               onRemoveBackgroundNode={removeBackgroundNode}
               onOpenFontStudio={() => setIsFontPickerModalOpen(true)}
+              onOpenUploadFont={(preferredMissingFont) =>
+                setFontUploadModal({ open: true, preferredMissingFont })
+              }
+              fontRegistryVersion={effectiveFontRegistryVersion}
             />
           </aside>
         )}
@@ -648,17 +766,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
         <main className="flex-1 min-w-0 min-h-0 flex flex-col">
           {/* Quick Contextual Action Bar */}
           {!isPreviewMode && (
-            <div className="px-4 py-2 border-b border-[#292929] bg-[#101010] flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div className="px-4 py-2 border-b border-[#E4E4E7] dark:border-[#292929] bg-white dark:bg-[#101010] flex flex-wrap items-center justify-between gap-2 shrink-0">
               {selectedIds.length > 1 ? (
                 <div className="flex flex-wrap items-center gap-2 min-w-0">
-                  <span className="text-xs font-medium text-[#F5F5F5]">
+                  <span className="text-xs font-medium text-[#111111] dark:text-[#F5F5F5]">
                     {selectedIds.length} selected
                   </span>
-                  <span className="text-[#292929]">|</span>
+                  <span className="text-[#D4D4D8] dark:text-[#292929]">|</span>
                   <button
                     type="button"
                     onClick={() => handleGroup(selectedIds)}
-                    className="h-[30px] px-2.5 rounded-md border border-[#E5E5E5] bg-[#E5E5E5] hover:bg-[#C0C0C0] text-[#090909] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                    className="h-[30px] px-2.5 rounded-md border border-[#18181B] bg-[#18181B] hover:bg-[#3F3F46] text-white dark:border-[#E5E5E5] dark:bg-[#E5E5E5] dark:hover:bg-[#C0C0C0] dark:text-[#090909] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
                   >
                     <Group className="w-3.5 h-3.5" />
                     <span>Group</span>
@@ -666,15 +784,15 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                   <button
                     type="button"
                     onClick={() => handleCopy(selectedIds)}
-                    className="h-[30px] px-2.5 rounded-md border border-[#292929] bg-[#151515] hover:bg-[#252525] text-xs text-[#F5F5F5] inline-flex items-center gap-1.5 cursor-pointer"
+                    className="h-[30px] px-2.5 rounded-md border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#E4E4E7] text-xs text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#F5F5F5] inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    <Copy className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                    <Copy className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                     <span>Copy</span>
                   </button>
                   <button
                     type="button"
                     onClick={() => handleDelete(selectedIds)}
-                    className="h-[30px] px-2.5 rounded-md border border-[#292929] bg-[#151515] hover:bg-[#252525] text-xs text-[#C0C0C0] hover:text-[#F5F5F5] inline-flex items-center gap-1.5 cursor-pointer"
+                    className="h-[30px] px-2.5 rounded-md border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#E4E4E7] text-xs text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] inline-flex items-center gap-1.5 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>Delete</span>
@@ -682,16 +800,16 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                 </div>
               ) : primaryNode ? (
                 <div className="flex flex-wrap items-center gap-2 min-w-0">
-                  <span className="text-xs font-medium text-[#F5F5F5] truncate max-w-[130px]">
+                  <span className="text-xs font-medium text-[#111111] dark:text-[#F5F5F5] truncate max-w-[130px]">
                     {primaryNode.label}
                   </span>
-                  <span className="text-[10px] font-mono text-[#737373]">
+                  <span className="text-[10px] font-mono text-[#71717A] dark:text-[#737373]">
                     &lt;{primaryNode.rawTag || primaryNode.tag}&gt;
                   </span>
 
                   {primaryNode.tag === 'text' && primaryTextProps && !primaryNode.locked && (
                     <>
-                      <span className="text-[#292929]">|</span>
+                      <span className="text-[#D4D4D8] dark:text-[#292929]">|</span>
                       <FontFamilyDropdown
                         nodeId={primaryNode.id}
                         nodeLabel={primaryNode.label}
@@ -709,7 +827,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                       <div
                         role="group"
                         aria-label="Text alignment"
-                        className="inline-flex items-center rounded-md border border-[#292929] bg-[#151515] overflow-hidden shrink-0"
+                        className="inline-flex items-center rounded-md border border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#151515] overflow-hidden shrink-0"
                       >
                         {(
                           [
@@ -730,11 +848,11 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                                 updateTextNode(primaryNode.id, { textAnchor: item.val })
                               }
                               className={`w-8 h-[30px] flex items-center justify-center cursor-pointer transition-colors ${
-                                idx > 0 ? 'border-l border-[#292929]' : ''
+                                idx > 0 ? 'border-l border-[#E4E4E7] dark:border-[#292929]' : ''
                               } ${
                                 active
-                                  ? 'bg-[#E5E5E5] text-[#090909]'
-                                  : 'bg-transparent text-[#999999] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                                  ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+                                  : 'bg-transparent text-[#52525B] hover:bg-[#E4E4E7] hover:text-[#111111] dark:text-[#999999] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
                               }`}
                             >
                               {item.icon}
@@ -750,8 +868,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                     !primaryNode.isPreservedUnsupported &&
                     !primaryNode.locked && (
                       <>
-                        <span className="text-[#292929]">|</span>
-                        <label className="inline-flex items-center gap-1.5 text-[11px] text-[#999999] cursor-pointer">
+                        <span className="text-[#D4D4D8] dark:text-[#292929]">|</span>
+                        <label className="inline-flex items-center gap-1.5 text-[11px] text-[#52525B] dark:text-[#999999] cursor-pointer">
                           <span>Fill</span>
                           <input
                             type="color"
@@ -760,10 +878,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                             onChange={(e) =>
                               setNodeFill(primaryNode.id, e.target.value.toUpperCase(), true)
                             }
-                            className="w-6 h-6 rounded border border-[#292929] cursor-pointer bg-[#0D0D0D] p-0"
+                            className="w-6 h-6 rounded border border-[#E4E4E7] dark:border-[#292929] cursor-pointer bg-white dark:bg-[#0D0D0D] p-0"
                           />
                         </label>
-                        <label className="inline-flex items-center gap-1.5 text-[11px] text-[#999999] cursor-pointer">
+                        <label className="inline-flex items-center gap-1.5 text-[11px] text-[#52525B] dark:text-[#999999] cursor-pointer">
                           <span>Stroke</span>
                           <input
                             type="color"
@@ -773,7 +891,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                               setNodeStroke(primaryNode.id, e.target.value.toUpperCase(), true);
                               if (!primaryStrokeHex) setNodeStrokeWidth(primaryNode.id, 2, true);
                             }}
-                            className="w-6 h-6 rounded border border-[#292929] cursor-pointer bg-[#0D0D0D] p-0"
+                            className="w-6 h-6 rounded border border-[#E4E4E7] dark:border-[#292929] cursor-pointer bg-white dark:bg-[#0D0D0D] p-0"
                           />
                         </label>
                       </>
@@ -784,7 +902,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                       type="button"
                       onClick={() => handleUngroup(primaryNode.id)}
                       title="Ungroup elements"
-                      className="h-[30px] px-2 rounded-md border border-[#292929] bg-[#151515] hover:bg-[#252525] text-xs text-[#E5E5E5] inline-flex items-center gap-1 cursor-pointer"
+                      className="h-[30px] px-2 rounded-md border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#E4E4E7] text-xs text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#E5E5E5] inline-flex items-center gap-1 cursor-pointer"
                     >
                       <Ungroup className="w-3.5 h-3.5" />
                       <span className="hidden xl:inline">Ungroup</span>
@@ -793,11 +911,11 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
 
                   {!primaryNode.isPreservedUnsupported && (
                     <>
-                      <span className="text-[#292929]">|</span>
+                      <span className="text-[#D4D4D8] dark:text-[#292929]">|</span>
                       <div
                         role="group"
                         aria-label="Layer order"
-                        className="inline-flex items-center rounded-md border border-[#292929] bg-[#151515] overflow-hidden shrink-0"
+                        className="inline-flex items-center rounded-md border border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#151515] overflow-hidden shrink-0"
                       >
                         <button
                           type="button"
@@ -805,7 +923,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                           aria-label="Bring Forward"
                           disabled={!canForward}
                           onClick={() => reorderNode(primaryNode.id, 'forward')}
-                          className="w-7 h-[30px] flex items-center justify-center text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5] disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
+                          className="w-7 h-[30px] flex items-center justify-center text-[#3F3F46] hover:bg-[#E4E4E7] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5] disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
                         >
                           <ArrowUp className="w-3.5 h-3.5" />
                         </button>
@@ -815,7 +933,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                           aria-label="Send Backward"
                           disabled={!canBackward}
                           onClick={() => reorderNode(primaryNode.id, 'backward')}
-                          className="w-7 h-[30px] border-l border-[#292929] flex items-center justify-center text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5] disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
+                          className="w-7 h-[30px] border-l border-[#E4E4E7] dark:border-[#292929] flex items-center justify-center text-[#3F3F46] hover:bg-[#E4E4E7] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5] disabled:opacity-35 cursor-pointer disabled:cursor-not-allowed"
                         >
                           <ArrowDown className="w-3.5 h-3.5" />
                         </button>
@@ -826,7 +944,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                         title="Duplicate (Ctrl+D)"
                         aria-label="Duplicate selected element"
                         onClick={() => handleDuplicate([primaryNode.id])}
-                        className="w-8 h-[30px] rounded-md border border-[#292929] bg-[#151515] hover:bg-[#252525] flex items-center justify-center text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer"
+                        className="w-8 h-[30px] rounded-md border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#E4E4E7] flex items-center justify-center text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer"
                       >
                         <Copy className="w-3.5 h-3.5" />
                       </button>
@@ -838,8 +956,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                         onClick={() => toggleNodeLock(primaryNode.id)}
                         className={`w-8 h-[30px] rounded-md border flex items-center justify-center cursor-pointer transition-colors ${
                           primaryNode.locked
-                            ? 'bg-[#E5E5E5] border-[#E5E5E5] text-[#090909]'
-                            : 'bg-[#151515] border-[#292929] text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                            ? 'bg-[#18181B] border-[#18181B] text-white dark:bg-[#E5E5E5] dark:border-[#E5E5E5] dark:text-[#090909]'
+                            : 'bg-[#FAFAFA] border-[#E4E4E7] text-[#3F3F46] hover:bg-[#E4E4E7] hover:text-[#111111] dark:bg-[#151515] dark:border-[#292929] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
                         }`}
                       >
                         {primaryNode.locked ? (
@@ -852,8 +970,8 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                   )}
                 </div>
               ) : (
-                <div className="text-xs text-[#999999] truncate">
-                  Click to select &middot; Double-click text to edit &middot; Right-click for actions
+                <div className="text-xs text-[#52525B] dark:text-[#999999] truncate">
+                  Click any text to edit in place &middot; Drag to move &middot; Right-click for actions
                 </div>
               )}
 
@@ -862,9 +980,9 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                   type="button"
                   onClick={handlePaste}
                   title="Paste copied elements (Ctrl+V)"
-                  className="h-[30px] px-2.5 rounded-md border border-[#C0C0C0]/60 bg-[#151515] hover:bg-[#252525] text-xs font-medium text-[#F5F5F5] inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                  className="h-[30px] px-2.5 rounded-md border border-[#A1A1AA] bg-[#FAFAFA] hover:bg-[#E4E4E7] text-xs font-medium text-[#111111] dark:border-[#C0C0C0]/60 dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#F5F5F5] inline-flex items-center gap-1.5 cursor-pointer shrink-0"
                 >
-                  <ClipboardPaste className="w-3.5 h-3.5 text-[#E5E5E5]" />
+                  <ClipboardPaste className="w-3.5 h-3.5 text-[#111111] dark:text-[#E5E5E5]" />
                   <span>Paste ({clipboardNodes.length})</span>
                 </button>
               )}
@@ -885,13 +1003,18 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               gridPreset="medium"
               hasClipboard={clipboardNodes.length > 0}
               onChangeToolMode={setToolMode}
-              onSelectNodes={setSelectedIds}
+              onSelectNodes={handleSelectNodes}
               onSelectBackground={() => setActiveNav('background')}
               onUpdateNodeTransform={updateNodeTransform}
               onBatchUpdateTransforms={batchUpdateTransforms}
               onUpdateTextNode={updateTextNode}
+              onCommitTextBoundary={commitUndoBoundary}
+              onDirectTextEdit={(nid) => {
+                handleSelectNodes([nid]);
+                setActiveNav('text');
+              }}
               onDoubleClickTextNode={(nid) => {
-                setSelectedIds([nid]);
+                handleSelectNodes([nid]);
                 setActiveNav('text');
               }}
               onCopyNodes={handleCopy}
@@ -904,6 +1027,7 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               onFlipNode={handleFlipNode}
               onCenterNode={(nid) => handleAlignNodes([nid], 'center-both', 'canvas')}
               onRegisterBoxReader={registerBoxReader}
+              onRegisterPivotReader={registerPivotReader}
             />
           </div>
         </main>
@@ -913,9 +1037,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
             scene={scene}
             transparentBackground={docState.transparentBackground}
             selectedIds={selectedIds}
-            onSelectNodes={setSelectedIds}
+            onSelectNodes={handleSelectNodes}
             onUpdateTextNode={updateTextNode}
-            onUpdateNodeTransform={updateNodeTransform}
+            onCommitTextBoundary={commitUndoBoundary}
+            onUpdateNodeTransform={handleInspectorTransformUpdate}
             onSetNodeFill={setNodeFill}
             onSetNodeStroke={setNodeStroke}
             onSetNodeStrokeWidth={setNodeStrokeWidth}
@@ -945,14 +1070,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               setPreviewOverride(fontFamily ? { nodeId, fontFamily } : null)
             }
             onOpenFontStudio={() => setIsFontPickerModalOpen(true)}
+            onOpenUploadFont={(preferredMissingFont) =>
+              setFontUploadModal({ open: true, preferredMissingFont })
+            }
             onOpenBackgroundTab={() => setActiveNav('background')}
           />
         )}
       </div>
 
       {/* MOBILE / TABLET RESPONSIVE STUDIO */}
-      <div className="flex lg:hidden flex-col flex-1 min-h-0 pb-16">
-        <div className="sticky top-0 z-20 border-b bg-[#101010] border-[#292929]">
+      <div className="flex lg:hidden flex-col flex-1 min-h-0">
+        <div className="sticky top-0 z-20 border-b bg-white border-[#E4E4E7] dark:bg-[#101010] dark:border-[#292929]">
           {!mobilePreviewCollapsed && (
             <div className="h-[36vh] min-h-[220px] max-h-[340px]">
               <InvitationCanvas
@@ -968,13 +1096,17 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                 gridPreset="medium"
                 hasClipboard={clipboardNodes.length > 0}
                 onChangeToolMode={setToolMode}
-                onSelectNodes={setSelectedIds}
+                onSelectNodes={handleSelectNodes}
                 onSelectBackground={() => setActiveNav('background')}
                 onUpdateNodeTransform={updateNodeTransform}
                 onBatchUpdateTransforms={batchUpdateTransforms}
                 onUpdateTextNode={updateTextNode}
+                onCommitTextBoundary={commitUndoBoundary}
+                onDirectTextEdit={(nid) => {
+                  handleSelectNodes([nid]);
+                }}
                 onDoubleClickTextNode={(nid) => {
-                  setSelectedIds([nid]);
+                  handleSelectNodes([nid]);
                   setActiveNav('text');
                   setMobileSection('studio');
                 }}
@@ -988,15 +1120,16 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                 onFlipNode={handleFlipNode}
                 onCenterNode={(nid) => handleAlignNodes([nid], 'center-both', 'canvas')}
                 onRegisterBoxReader={registerBoxReader}
+                onRegisterPivotReader={registerPivotReader}
               />
             </div>
           )}
 
-          <div className="px-4 py-1.5 min-h-[42px] flex flex-wrap items-center justify-between gap-2 bg-[#101010]">
+          <div className="px-4 py-1.5 min-h-[42px] flex flex-wrap items-center justify-between gap-2 bg-white dark:bg-[#101010]">
             <button
               type="button"
               onClick={() => setMobilePreviewCollapsed((c) => !c)}
-              className="min-h-[34px] flex items-center gap-1.5 text-xs font-medium cursor-pointer text-[#999999] hover:text-[#F5F5F5] transition-colors"
+              className="min-h-[34px] flex items-center gap-1.5 text-xs font-medium cursor-pointer text-[#52525B] hover:text-[#111111] dark:text-[#999999] dark:hover:text-[#F5F5F5] transition-colors"
             >
               <span>{mobilePreviewCollapsed ? 'Show Live SVG' : 'Hide Canvas'}</span>
               {mobilePreviewCollapsed ? (
@@ -1007,14 +1140,14 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
             </button>
 
             <div className="flex items-center gap-1.5">
-              <div className="inline-flex rounded border border-[#292929] overflow-hidden">
+              <div className="inline-flex rounded border border-[#E4E4E7] dark:border-[#292929] overflow-hidden">
                 <button
                   type="button"
                   onClick={() => setMobileSection('studio')}
                   className={`px-2.5 h-7 text-[11px] font-medium cursor-pointer ${
                     mobileSection === 'studio'
-                      ? 'bg-[#E5E5E5] text-[#090909]'
-                      : 'bg-[#151515] text-[#C0C0C0]'
+                      ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+                      : 'bg-[#FAFAFA] text-[#3F3F46] dark:bg-[#151515] dark:text-[#C0C0C0]'
                   }`}
                 >
                   Panels
@@ -1022,10 +1155,10 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                 <button
                   type="button"
                   onClick={() => setMobileSection('inspector')}
-                  className={`px-2.5 h-7 text-[11px] font-medium inline-flex items-center gap-1 border-l border-[#292929] cursor-pointer ${
+                  className={`px-2.5 h-7 text-[11px] font-medium inline-flex items-center gap-1 border-l border-[#E4E4E7] dark:border-[#292929] cursor-pointer ${
                     mobileSection === 'inspector'
-                      ? 'bg-[#E5E5E5] text-[#090909]'
-                      : 'bg-[#151515] text-[#C0C0C0]'
+                      ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+                      : 'bg-[#FAFAFA] text-[#3F3F46] dark:bg-[#151515] dark:text-[#C0C0C0]'
                   }`}
                 >
                   <SlidersHorizontal className="w-3 h-3" />
@@ -1036,16 +1169,16 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               <button
                 type="button"
                 onClick={handleQuickAddText}
-                className="min-h-[30px] px-2.5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] inline-flex items-center gap-1 text-[11px] font-medium text-[#E5E5E5] cursor-pointer"
+                className="min-h-[30px] px-2.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#E4E4E7] text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#E5E5E5] inline-flex items-center gap-1 text-[11px] font-medium cursor-pointer"
               >
-                <Plus className="w-3 h-3 text-[#C0C0C0]" />
+                <Plus className="w-3 h-3 text-[#52525B] dark:text-[#C0C0C0]" />
                 <span>Text</span>
               </button>
             </div>
           </div>
         </div>
 
-        <div className="flex-1 bg-[#151515]">
+        <div className="flex-1 bg-[#FAFAFA] dark:bg-[#151515]">
           {mobileSection === 'studio' ? (
             <FieldPanel
               scene={scene}
@@ -1053,8 +1186,9 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               selectedIds={selectedIds}
               activeNav={activeNav}
               onChangeNav={setActiveNav}
-              onSelectNodes={setSelectedIds}
+              onSelectNodes={handleSelectNodes}
               onUpdateTextNode={updateTextNode}
+              onCommitTextBoundary={commitUndoBoundary}
               onApplyBatchTextUpdates={applyBatchTextUpdates}
               onAddTextPreset={handleAddTextPreset}
               onInsertSceneNode={insertSceneNode}
@@ -1071,16 +1205,21 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
               onSetBackgroundImage={setBackgroundImage}
               onRemoveBackgroundNode={removeBackgroundNode}
               onOpenFontStudio={() => setIsFontPickerModalOpen(true)}
+              onOpenUploadFont={(preferredMissingFont) =>
+                setFontUploadModal({ open: true, preferredMissingFont })
+              }
               onOpenDownload={() => setIsExportModalOpen(true)}
+              fontRegistryVersion={effectiveFontRegistryVersion}
             />
           ) : (
             <RightInspector
               scene={scene}
               transparentBackground={docState.transparentBackground}
               selectedIds={selectedIds}
-              onSelectNodes={setSelectedIds}
+              onSelectNodes={handleSelectNodes}
               onUpdateTextNode={updateTextNode}
-              onUpdateNodeTransform={updateNodeTransform}
+              onCommitTextBoundary={commitUndoBoundary}
+              onUpdateNodeTransform={handleInspectorTransformUpdate}
               onSetNodeFill={setNodeFill}
               onSetNodeStroke={setNodeStroke}
               onSetNodeStrokeWidth={setNodeStrokeWidth}
@@ -1110,6 +1249,9 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
                 setPreviewOverride(fontFamily ? { nodeId, fontFamily } : null)
               }
               onOpenFontStudio={() => setIsFontPickerModalOpen(true)}
+              onOpenUploadFont={(preferredMissingFont) =>
+                setFontUploadModal({ open: true, preferredMissingFont })
+              }
               onOpenBackgroundTab={() => {
                 setActiveNav('background');
                 setMobileSection('studio');
@@ -1119,13 +1261,13 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
         </div>
 
         {/* Compact Mobile Bottom Action Bar */}
-        <div className="fixed bottom-0 inset-x-0 z-30 h-14 px-4 border-t flex items-center justify-between gap-2 bg-[#101010] border-[#292929]">
+        <div className="fixed bottom-0 inset-x-0 z-30 h-14 px-4 border-t flex items-center justify-between gap-2 bg-white border-[#E4E4E7] dark:bg-[#101010] dark:border-[#292929]">
           <button
             type="button"
             onClick={() => setIsHelpOpen(true)}
-            className="h-10 px-3 rounded-md border inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer bg-[#151515] border-[#292929] text-[#F5F5F5] hover:bg-[#252525] hover:border-[#C0C0C0] transition-colors"
+            className="h-10 px-3 rounded-md border inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer bg-[#FAFAFA] border-[#E4E4E7] text-[#111111] hover:bg-[#E4E4E7] hover:border-[#A1A1AA] dark:bg-[#151515] dark:border-[#292929] dark:text-[#F5F5F5] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] transition-colors"
           >
-            <HelpCircle className="w-4 h-4 text-[#C0C0C0]" />
+            <HelpCircle className="w-4 h-4 text-[#52525B] dark:text-[#C0C0C0]" />
             <span>Help</span>
           </button>
 
@@ -1133,21 +1275,31 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
             type="button"
             onClick={() => setIsClearOpen(true)}
             aria-label="Clear current design"
-            className="h-10 px-3 rounded-md border inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer bg-[#151515] border-[#292929] text-[#F5F5F5] hover:bg-[#252525] hover:border-[#C0C0C0] transition-colors"
+            className="h-10 px-3 rounded-md border inline-flex items-center gap-1.5 text-xs font-medium cursor-pointer bg-[#FAFAFA] border-[#E4E4E7] text-[#111111] hover:bg-[#E4E4E7] hover:border-[#A1A1AA] dark:bg-[#151515] dark:border-[#292929] dark:text-[#F5F5F5] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] transition-colors"
           >
-            <Trash2 className="w-4 h-4 text-[#C0C0C0]" />
+            <Trash2 className="w-4 h-4 text-[#52525B] dark:text-[#C0C0C0]" />
             <span>Clear</span>
           </button>
 
           <button
             type="button"
             onClick={() => setIsExportModalOpen(true)}
-            className="flex-1 h-10 px-4 rounded-md inline-flex items-center justify-center gap-2 text-sm font-semibold cursor-pointer bg-[#E5E5E5] hover:bg-[#C0C0C0] text-[#090909] border border-[#E5E5E5] hover:border-[#C0C0C0] transition-colors"
+            className="flex-1 h-10 px-4 rounded-md inline-flex items-center justify-center gap-2 text-sm font-semibold cursor-pointer bg-[#18181B] hover:bg-[#3F3F46] text-white border border-[#18181B] hover:border-[#3F3F46] dark:bg-[#E5E5E5] dark:hover:bg-[#C0C0C0] dark:text-[#090909] dark:border-[#E5E5E5] dark:hover:border-[#C0C0C0] transition-colors"
           >
             <Download className="w-4 h-4" />
             <span>Download SVG</span>
           </button>
         </div>
+      </div>
+
+      {/* Real-time Diagnostic Dashboard Footer */}
+      <div className="pb-14 lg:pb-0">
+        <EditorDiagnosticFooter
+          scene={scene}
+          transparentBackground={docState.transparentBackground}
+          selectedCount={selectedIds.length}
+          fontRegistryVersion={effectiveFontRegistryVersion}
+        />
       </div>
 
       {/* Modals */}
@@ -1164,6 +1316,28 @@ export const EditorPage: React.FC<EditorPageProps> = ({ template, onClearDesign 
           }
           isModal
           onCloseModal={() => setIsFontPickerModalOpen(false)}
+        />
+      )}
+
+      {fontUploadModal.open && (
+        <FontUploadModal
+          isOpen={fontUploadModal.open}
+          fontSummary={scanSceneFontUsage(scene)}
+          selectedTextNodeId={primaryNode?.tag === 'text' ? primaryNode.id : null}
+          selectedTextNodeLabel={primaryNode?.tag === 'text' ? primaryNode.label : undefined}
+          initialMissingFont={fontUploadModal.preferredMissingFont}
+          onClose={() => setFontUploadModal({ open: false })}
+          onApplyUploadedFont={(nodeIds, family) => {
+            clearFontAvailabilityCache();
+            if (nodeIds.length > 0) {
+              const batch: Record<string, TextEditPatch> = {};
+              for (const nid of nodeIds) {
+                batch[nid] = { fontFamily: family };
+              }
+              applyBatchTextUpdates(batch);
+            }
+            setFontRegistryVersion((v) => v + 1);
+          }}
         />
       )}
 

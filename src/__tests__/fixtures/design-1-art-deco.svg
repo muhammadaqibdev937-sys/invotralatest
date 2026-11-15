@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 800 1100" width="800" height="1100" data-marketplace-sku="art-deco-01">
+  <defs>
+    <linearGradient id="decoGold" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F3D68C" />
+      <stop offset="100%" stop-color="#B08432" />
+    </linearGradient>
+    <pattern id="decoFanPattern" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M0 40 A40 40 0 0 1 40 0 M0 40 A26 26 0 0 1 26 14" fill="none" stroke="#D4AF37" stroke-width="1.2" stroke-opacity="0.35" />
+    </pattern>
+    <clipPath id="decoArchClip">
+      <path d="M120 220 A280 280 0 0 1 680 220 L680 960 L120 960 Z" />
+    </clipPath>
+    <path id="decoTopArc" d="M 150 280 A 250 250 0 0 1 650 280" />
+    <path id="decoBottomArc" d="M 180 860 A 220 220 0 0 0 620 860" />
+  </defs>
+
+  <rect x="0" y="0" width="800" height="1100" fill="#111318" data-bg="true" />
+  <rect x="60" y="60" width="680" height="980" fill="url(#decoFanPattern)" stroke="url(#decoGold)" stroke-width="4" stroke-dasharray="14 6 4 6" />
+
+  <g transform="translate(0, 10)" data-custom-group="frame-arch" clip-path="url(#decoArchClip)">
+    <g transform="scale(1, 1) translate(0, 0)">
+      <rect x="120" y="120" width="560" height="840" fill="#181C24" stroke="#D4AF37" stroke-width="2" />
+    </g>
+  </g>
+
+  <text font-family="Cinzel" font-size="34" fill="#F3D68C" letter-spacing="4" data-role="curved-header">
+    <textPath href="#decoTopArc" startOffset="50%" text-anchor="middle">THE GATSBY GALA</textPath>
+  </text>
+
+  <text font-family="Playfair Display" font-size="24" fill="#E8DFCA">
+    <textPath xlink:href="#decoBottomArc" startOffset="50%" text-anchor="middle">
+      <tspan dy="-6">DECEMBER</tspan>
+      <tspan dx="12" font-weight="700">31</tspan>
+    </textPath>
+  </text>
+
+  <text x="400" y="540" text-anchor="middle" font-family="Cormorant Garamond" font-size="52" fill="#FFFFFF">
+    <tspan>ELEANOR</tspan>
+    <tspan dx="14" fill="#D4AF37">&amp;</tspan>
+    <tspan dx="14">ARTHUR</tspan>
+  </text>
+</svg>

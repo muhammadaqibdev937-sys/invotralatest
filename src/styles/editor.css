@@ -8,15 +8,26 @@
 }
 
 .ea-scrollbar::-webkit-scrollbar-thumb {
-  background: #292929;
+  background: var(--ea-border-strong);
   border-radius: 3px;
 }
 
 .ea-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #3F3F46;
+  background: var(--ea-text-muted);
 }
 
 .ea-checkerboard {
+  background-color: #F4F4F5;
+  background-image:
+    linear-gradient(45deg, #E4E4E7 25%, transparent 25%),
+    linear-gradient(-45deg, #E4E4E7 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #E4E4E7 75%),
+    linear-gradient(-45deg, transparent 75%, #E4E4E7 75%);
+  background-size: 20px 20px;
+  background-position: 0 0, 0 10px, 10px -10px, -10px 0;
+}
+
+.dark .ea-checkerboard {
   background-color: #1A1A1A;
   background-image:
     linear-gradient(45deg, #242424 25%, transparent 25%),

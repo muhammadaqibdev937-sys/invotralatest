@@ -6,7 +6,11 @@ import {
   SvgSceneNode,
   SvgStaticNode,
 } from '../../engine/svgScene';
-import { resolveFontFamily } from '../../engine/fonts';
+import {
+  getUploadedFontEngineEntry,
+  isFontAvailableInBrowser,
+  resolveFontFamily,
+} from '../../engine/fonts';
 import { getFontDefinition } from '../../services/fontLoader';
 
 const SVG_ATTR_TO_REACT: Record<string, string> = {
@@ -38,32 +42,80 @@ const SVG_ATTR_TO_REACT: Record<string, string> = {
   'stop-color': 'stopColor',
   'stop-opacity': 'stopOpacity',
   'gradient-units': 'gradientUnits',
+  gradientunits: 'gradientUnits',
   'gradient-transform': 'gradientTransform',
+  gradienttransform: 'gradientTransform',
+  'spread-method': 'spreadMethod',
+  spreadmethod: 'spreadMethod',
   'pattern-units': 'patternUnits',
+  patternunits: 'patternUnits',
   'pattern-transform': 'patternTransform',
+  patterntransform: 'patternTransform',
   'pattern-content-units': 'patternContentUnits',
+  patterncontentunits: 'patternContentUnits',
   'clip-path-units': 'clipPathUnits',
+  clippathunits: 'clipPathUnits',
   'mask-units': 'maskUnits',
+  maskunits: 'maskUnits',
   'mask-content-units': 'maskContentUnits',
+  maskcontentunits: 'maskContentUnits',
   'marker-start': 'markerStart',
   'marker-mid': 'markerMid',
   'marker-end': 'markerEnd',
   'marker-width': 'markerWidth',
+  markerwidth: 'markerWidth',
   'marker-height': 'markerHeight',
+  markerheight: 'markerHeight',
   'marker-units': 'markerUnits',
+  markerunits: 'markerUnits',
   'ref-x': 'refX',
+  refx: 'refX',
   'ref-y': 'refY',
+  refy: 'refY',
   'preserve-aspect-ratio': 'preserveAspectRatio',
+  preserveaspectratio: 'preserveAspectRatio',
+  viewbox: 'viewBox',
   'vector-effect': 'vectorEffect',
   'shape-rendering': 'shapeRendering',
   'color-interpolation': 'colorInterpolation',
   'color-interpolation-filters': 'colorInterpolationFilters',
+  colorinterpolationfilters: 'colorInterpolationFilters',
   'flood-color': 'floodColor',
+  floodcolor: 'floodColor',
   'flood-opacity': 'floodOpacity',
+  floodopacity: 'floodOpacity',
   'lighting-color': 'lightingColor',
+  lightingcolor: 'lightingColor',
   'std-deviation': 'stdDeviation',
+  stddeviation: 'stdDeviation',
   'base-frequency': 'baseFrequency',
+  basefrequency: 'baseFrequency',
   'num-octaves': 'numOctaves',
+  numoctaves: 'numOctaves',
+  'x-channel-selector': 'xChannelSelector',
+  xchannelselector: 'xChannelSelector',
+  'y-channel-selector': 'yChannelSelector',
+  ychannelselector: 'yChannelSelector',
+  'filter-units': 'filterUnits',
+  filterunits: 'filterUnits',
+  'primitive-units': 'primitiveUnits',
+  primitiveunits: 'primitiveUnits',
+  'stitch-tiles': 'stitchTiles',
+  stitchtiles: 'stitchTiles',
+  'edge-mode': 'edgeMode',
+  edgemode: 'edgeMode',
+  surfacescale: 'surfaceScale',
+  specularconstant: 'specularConstant',
+  specularexponent: 'specularExponent',
+  diffuseconstant: 'diffuseConstant',
+  kernelmatrix: 'kernelMatrix',
+  tablevalues: 'tableValues',
+  'start-offset': 'startOffset',
+  startoffset: 'startOffset',
+  'text-length': 'textLength',
+  textlength: 'textLength',
+  'length-adjust': 'lengthAdjust',
+  lengthadjust: 'lengthAdjust',
   'paint-order': 'paintOrder',
   tabindex: 'tabIndex',
 };
@@ -97,13 +149,23 @@ function inlineStyleToReactObject(styleStr: string | undefined): React.CSSProper
   return Object.keys(out).length > 0 ? (out as React.CSSProperties) : undefined;
 }
 
-function getCssFontFallback(rawFamily: string): string {
+export function getCssFontFallback(rawFamily: string): string {
   const first = rawFamily.split(',')[0]?.trim().replace(/^['"]|['"]$/g, '') || '';
   const def = getFontDefinition(first);
   if (def) {
     const fallback =
       def.category === 'Script' ? 'cursive' : def.category === 'Sans' ? 'sans-serif' : 'serif';
     return `"${def.family}", ${fallback}`;
+  }
+  const uploaded = getUploadedFontEngineEntry(first);
+  if (uploaded) {
+    const fallback =
+      uploaded.category === 'Script'
+        ? 'cursive'
+        : uploaded.category === 'Sans'
+        ? 'sans-serif'
+        : 'serif';
+    return `"${uploaded.family}", ${fallback}`;
   }
   const resolved = resolveFontFamily(rawFamily);
   const bundledDef = getFontDefinition(resolved.resolvedFamily);
@@ -113,9 +175,13 @@ function getCssFontFallback(rawFamily: string): string {
       : bundledDef?.category === 'Sans'
       ? 'sans-serif'
       : 'serif';
-  return first
+  if (!first) {
+    return `"${resolved.resolvedFamily}", ${fallback}`;
+  }
+  const browserHasOriginal = isFontAvailableInBrowser(first);
+  return browserHasOriginal
     ? `"${first}", "${resolved.resolvedFamily}", ${fallback}`
-    : `"${resolved.resolvedFamily}", ${fallback}`;
+    : `"${resolved.resolvedFamily}", "${first}", ${fallback}`;
 }
 
 export function svgAttrsToReactProps(
@@ -123,6 +189,7 @@ export function svgAttrsToReactProps(
   options?: { keepTransform?: boolean; fontPreviewFamily?: string }
 ): Record<string, unknown> {
   const props: Record<string, unknown> = {};
+  const attrStyleFallback: Record<string, string> = {};
 
   for (const [rawKey, rawVal] of Object.entries(attrs)) {
     const lower = rawKey.toLowerCase();
@@ -137,12 +204,29 @@ export function svgAttrsToReactProps(
       continue;
     }
 
+    if (lower === 'mix-blend-mode') {
+      attrStyleFallback.mixBlendMode = rawVal;
+      continue;
+    }
+
+    if (lower === 'isolation') {
+      attrStyleFallback.isolation = rawVal;
+      continue;
+    }
+
     const reactKey = SVG_ATTR_TO_REACT[lower] || rawKey;
     if (reactKey === 'fontFamily') {
       props[reactKey] = getCssFontFallback(rawVal);
     } else {
       props[reactKey] = rawVal;
     }
+  }
+
+  if (Object.keys(attrStyleFallback).length > 0) {
+    props.style = {
+      ...attrStyleFallback,
+      ...((props.style as Record<string, string>) || {}),
+    };
   }
 
   if (options?.fontPreviewFamily) {
@@ -180,6 +264,7 @@ export function renderStaticSvgNode(node: SvgStaticNode, key: string): React.Rea
 
 interface RenderSceneOptions {
   previewFontOverride?: { nodeId: string; fontFamily: string } | null;
+  editingNodeId?: string | null;
   transparentBackground?: boolean;
   onNodePointerDown?: (e: React.PointerEvent<SVGElement>, node: SvgSceneNode) => void;
   onNodeDoubleClick?: (e: React.MouseEvent<SVGElement>, node: SvgSceneNode) => void;
@@ -187,26 +272,21 @@ interface RenderSceneOptions {
   interactive?: boolean;
 }
 
-export function renderSceneNode(
-  node: SvgSceneNode,
-  options: RenderSceneOptions = {}
-): React.ReactNode {
-  if (!node.visible) return null;
-  if (options.transparentBackground && node.isBackground) return null;
-
-  if (node.tag === 'preserved' && node.staticNode) {
-    return React.createElement(
-      'g',
-      {
-        key: node.id,
-        'data-scene-id': node.id,
-        'data-scene-tag': 'preserved',
-        style: { pointerEvents: 'none' },
-      },
-      renderStaticSvgNode(node.staticNode, `${node.id}_static`)
-    );
+function nodeContainsId(node: SvgSceneNode, targetId: string | null | undefined): boolean {
+  if (!targetId) return false;
+  if (node.id === targetId) return true;
+  if (!node.children || node.children.length === 0) return false;
+  for (const child of node.children) {
+    if (nodeContainsId(child, targetId)) return true;
   }
+  return false;
+}
 
+function buildSceneNodeProps(
+  node: SvgSceneNode,
+  options: RenderSceneOptions,
+  includeKey = true
+): Record<string, unknown> {
   const isPreviewed = options.previewFontOverride?.nodeId === node.id;
   const previewFam = isPreviewed ? options.previewFontOverride?.fontFamily : undefined;
 
@@ -214,7 +294,9 @@ export function renderSceneNode(
     fontPreviewFamily: previewFam,
   });
 
-  props.key = node.id;
+  if (includeKey) {
+    props.key = node.id;
+  }
   props['data-scene-id'] = node.id;
   props['data-scene-tag'] = node.tag;
 
@@ -255,37 +337,204 @@ export function renderSceneNode(
     }
   }
 
+  return props;
+}
+
+function renderTextChildren(
+  node: SvgSceneNode,
+  props: Record<string, unknown>,
+  options: RenderSceneOptions
+): React.ReactNode {
+  const isPreviewed = options.previewFontOverride?.nodeId === node.id;
+  const previewFam = isPreviewed ? options.previewFontOverride?.fontFamily : undefined;
+  const isDirectEditing = options.editingNodeId === node.id && !node.textPath;
+  props.xmlSpace = 'preserve';
+  props.style = {
+    ...((props.style as Record<string, string>) || {}),
+    whiteSpace: 'pre',
+    ...(isDirectEditing ? { opacity: '0', pointerEvents: 'none' } : {}),
+  };
+  if (node.textPath) {
+    const tpProps = svgAttrsToReactProps(node.textPath.attrs, {
+      fontPreviewFamily: previewFam,
+    });
+    tpProps.key = `${node.id}_tp`;
+    const tpChildren =
+      node.textPath.tspans && node.textPath.tspans.length > 0
+        ? node.textPath.tspans.map((ts) => {
+            const tsProps = svgAttrsToReactProps(ts.attrs, {
+              fontPreviewFamily: previewFam,
+            });
+            tsProps.key = ts.id;
+            return React.createElement('tspan', tsProps, ts.text || ' ');
+          })
+        : [node.textPath.textContent || ' '];
+    const textPathEl = React.createElement('textPath', tpProps, ...tpChildren);
+    return React.createElement('text', props, textPathEl);
+  }
+  if (node.tspans && node.tspans.length > 0) {
+    const tspanEls = node.tspans.map((ts) => {
+      const tsProps = svgAttrsToReactProps(ts.attrs, {
+        fontPreviewFamily: previewFam,
+      });
+      tsProps.key = ts.id;
+      return React.createElement('tspan', tsProps, ts.text || ' ');
+    });
+    return React.createElement('text', props, ...tspanEls);
+  }
+  return React.createElement('text', props, node.textContent || ' ');
+}
+
+export function renderSceneNode(
+  node: SvgSceneNode,
+  options: RenderSceneOptions = {}
+): React.ReactNode {
+  if (!node.visible) return null;
+  if (options.transparentBackground && node.isBackground) return null;
+
+  if (node.tag === 'preserved' && node.staticNode) {
+    return React.createElement(
+      'g',
+      {
+        key: node.id,
+        'data-scene-id': node.id,
+        'data-scene-tag': 'preserved',
+        style: { pointerEvents: 'none' },
+      },
+      renderStaticSvgNode(node.staticNode, `${node.id}_static`)
+    );
+  }
+
+  const props = buildSceneNodeProps(node, options, true);
+
   if (node.tag === 'g') {
+    const inlineDefs = (node.inlineDefs ?? []).map((defNode, idx) =>
+      renderStaticSvgNode(defNode, `${node.id}_def_${idx}`)
+    );
     const children = (node.children ?? []).map((child) => renderSceneNode(child, options));
-    return React.createElement('g', props, ...children);
+    return React.createElement('g', props, ...inlineDefs, ...children);
   }
 
   if (node.tag === 'text') {
-    props.xmlSpace = 'preserve';
-    props.style = {
-      ...((props.style as Record<string, string>) || {}),
-      whiteSpace: 'pre',
-    };
-    if (node.tspans && node.tspans.length > 0) {
-      const tspanEls = node.tspans.map((ts) => {
-        const tsProps = svgAttrsToReactProps(ts.attrs, {
-          fontPreviewFamily: previewFam,
-        });
-        tsProps.key = ts.id;
-        return React.createElement('tspan', tsProps, ts.text || ' ');
-      });
-      return React.createElement('text', props, ...tspanEls);
-    }
-    return React.createElement('text', props, node.textContent || ' ');
+    return renderTextChildren(node, props, options);
   }
 
   return React.createElement(node.tag, props);
 }
 
+interface MemoSceneNodeProps {
+  node: SvgSceneNode;
+  transparentBackground: boolean;
+  previewFontOverride: { nodeId: string; fontFamily: string } | null;
+  editingNodeId: string | null;
+  interactive: boolean;
+  onNodePointerDown?: (e: React.PointerEvent<SVGElement>, node: SvgSceneNode) => void;
+  onNodeDoubleClick?: (e: React.MouseEvent<SVGElement>, node: SvgSceneNode) => void;
+  onNodeContextMenu?: (e: React.MouseEvent<SVGElement>, node: SvgSceneNode) => void;
+}
+
+const MemoSceneNode: React.FC<MemoSceneNodeProps> = React.memo(
+  ({
+    node,
+    transparentBackground,
+    previewFontOverride,
+    editingNodeId,
+    interactive,
+    onNodePointerDown,
+    onNodeDoubleClick,
+    onNodeContextMenu,
+  }) => {
+    if (!node.visible) return null;
+    if (transparentBackground && node.isBackground) return null;
+
+    if (node.tag === 'preserved' && node.staticNode) {
+      return React.createElement(
+        'g',
+        {
+          'data-scene-id': node.id,
+          'data-scene-tag': 'preserved',
+          style: { pointerEvents: 'none' },
+        },
+        renderStaticSvgNode(node.staticNode, `${node.id}_static`)
+      );
+    }
+
+    const options: RenderSceneOptions = {
+      previewFontOverride,
+      editingNodeId,
+      transparentBackground,
+      interactive,
+      onNodePointerDown,
+      onNodeDoubleClick,
+      onNodeContextMenu,
+    };
+
+    const props = buildSceneNodeProps(node, options, false);
+
+    if (node.tag === 'g') {
+      const inlineDefs = (node.inlineDefs ?? []).map((defNode, idx) =>
+        renderStaticSvgNode(defNode, `${node.id}_def_${idx}`)
+      );
+      const children = (node.children ?? []).map((child) => (
+        <MemoSceneNode
+          key={child.id}
+          node={child}
+          transparentBackground={transparentBackground}
+          previewFontOverride={previewFontOverride}
+          editingNodeId={editingNodeId}
+          interactive={interactive}
+          onNodePointerDown={onNodePointerDown}
+          onNodeDoubleClick={onNodeDoubleClick}
+          onNodeContextMenu={onNodeContextMenu}
+        />
+      ));
+      return React.createElement('g', props, ...inlineDefs, ...children);
+    }
+
+    if (node.tag === 'text') {
+      return renderTextChildren(node, props, options);
+    }
+
+    return React.createElement(node.tag, props);
+  },
+  (prev, next) => {
+    if (prev.node !== next.node) return false;
+    if (prev.transparentBackground !== next.transparentBackground) return false;
+    if (prev.interactive !== next.interactive) return false;
+    if (prev.onNodePointerDown !== next.onNodePointerDown) return false;
+    if (prev.onNodeDoubleClick !== next.onNodeDoubleClick) return false;
+    if (prev.onNodeContextMenu !== next.onNodeContextMenu) return false;
+
+    if (prev.editingNodeId !== next.editingNodeId) {
+      const prevHits = nodeContainsId(prev.node, prev.editingNodeId);
+      const nextHits = nodeContainsId(next.node, next.editingNodeId);
+      if (prevHits || nextHits) return false;
+    }
+
+    if (prev.previewFontOverride !== next.previewFontOverride) {
+      const prevFamHits = nodeContainsId(prev.node, prev.previewFontOverride?.nodeId);
+      const nextFamHits = nodeContainsId(next.node, next.previewFontOverride?.nodeId);
+      if (
+        prevFamHits ||
+        nextFamHits ||
+        (prev.previewFontOverride?.fontFamily !== next.previewFontOverride?.fontFamily &&
+          (prevFamHits || nextFamHits))
+      ) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+);
+
+MemoSceneNode.displayName = 'MemoSceneNode';
+
 interface SvgSceneContentProps {
   scene: SvgSceneDocument;
   transparentBackground?: boolean;
   previewFontOverride?: { nodeId: string; fontFamily: string } | null;
+  editingNodeId?: string | null;
   interactive?: boolean;
   onNodePointerDown?: (e: React.PointerEvent<SVGElement>, node: SvgSceneNode) => void;
   onNodeDoubleClick?: (e: React.MouseEvent<SVGElement>, node: SvgSceneNode) => void;
@@ -297,6 +546,7 @@ export const SvgSceneContent: React.FC<SvgSceneContentProps> = React.memo(
     scene,
     transparentBackground = false,
     previewFontOverride = null,
+    editingNodeId = null,
     interactive = false,
     onNodePointerDown,
     onNodeDoubleClick,
@@ -317,16 +567,19 @@ export const SvgSceneContent: React.FC<SvgSceneContentProps> = React.memo(
           />
         )}
 
-        {scene.nodes.map((node) =>
-          renderSceneNode(node, {
-            previewFontOverride,
-            transparentBackground,
-            interactive,
-            onNodePointerDown,
-            onNodeDoubleClick,
-            onNodeContextMenu,
-          })
-        )}
+        {scene.nodes.map((node) => (
+          <MemoSceneNode
+            key={node.id}
+            node={node}
+            transparentBackground={transparentBackground}
+            previewFontOverride={previewFontOverride}
+            editingNodeId={editingNodeId}
+            interactive={interactive}
+            onNodePointerDown={onNodePointerDown}
+            onNodeDoubleClick={onNodeDoubleClick}
+            onNodeContextMenu={onNodeContextMenu}
+          />
+        ))}
       </>
     );
   }

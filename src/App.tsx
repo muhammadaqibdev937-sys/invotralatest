@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { UploadLanding } from './components/Upload/UploadLanding';
 import { LoadedTemplateV1 } from './engine/schema';
 import { storageKeyForSvgDesign } from './hooks/useEditorState';
+import { usePersistedUploadedFonts } from './hooks/usePersistedUploadedFonts';
 import { useTheme } from './hooks/useTheme';
 import { EditorPage } from './pages/EditorPage';
 
@@ -59,6 +60,7 @@ function clearSessionDesign(designId?: string): void {
 
 export default function App() {
   useTheme();
+  usePersistedUploadedFonts();
   const [activeTemplate, setActiveTemplate] = useState<LoadedTemplateV1 | null>(() =>
     readSessionDesign()
   );

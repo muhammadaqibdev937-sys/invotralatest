@@ -28,13 +28,18 @@ export function useHistory<T>(initialState: T | null) {
     });
   }, []);
 
+  const breakCoalesce = useCallback(() => {
+    lastCoalesceKeyRef.current = '';
+    lastCoalesceTimeRef.current = 0;
+  }, []);
+
   const commit = useCallback(
     (updater: (prev: T) => T, coalesceKey = '') => {
       const now = Date.now();
       const isCoalesced =
         Boolean(coalesceKey) &&
         lastCoalesceKeyRef.current === coalesceKey &&
-        now - lastCoalesceTimeRef.current < 650;
+        now - lastCoalesceTimeRef.current < 500;
 
       lastCoalesceKeyRef.current = coalesceKey;
       lastCoalesceTimeRef.current = now;
@@ -100,5 +105,6 @@ export function useHistory<T>(initialState: T | null) {
     undo,
     redo,
     resetHistory,
+    breakCoalesce,
   };
 }

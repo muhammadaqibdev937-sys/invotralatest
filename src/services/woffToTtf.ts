@@ -114,3 +114,13 @@ export function uint8ToBase64(bytes: Uint8Array): string {
   }
   return btoa(binary);
 }
+
+export function base64ToUint8(base64: string): Uint8Array {
+  const clean = base64.replace(/\s+/g, '');
+  const binary = atob(clean);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}

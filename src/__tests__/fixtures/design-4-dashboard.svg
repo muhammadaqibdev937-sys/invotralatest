@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640" data-layout="analytics-v2">
+  <defs>
+    <marker id="arrowEnd" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#38BDF8" />
+    </marker>
+    <marker id="dotStart" markerWidth="8" markerHeight="8" refX="4" refY="4">
+      <circle cx="4" cy="4" r="3" fill="#22C55E" />
+    </marker>
+    <filter id="cardShadow" x="-10%" y="-10%" width="125%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.35" />
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1000" height="640" fill="#0F172A" />
+
+  <g transform="translate(48, 48)" data-widget="kpi-card">
+    <marker id="nestedTickMarker" markerWidth="6" markerHeight="6" refX="3" refY="3">
+      <circle cx="3" cy="3" r="2.5" fill="#F59E0B" />
+    </marker>
+    <symbol id="nestedSparkIcon" viewBox="0 0 24 24">
+      <path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z" fill="#38BDF8" />
+    </symbol>
+    <filter id="nestedSoftBlur" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="2" />
+    </filter>
+
+    <rect x="0" y="0" width="904" height="544" rx="16" fill="#1E293B" stroke="#334155" stroke-width="1.5" filter="url(#cardShadow)" />
+    <use href="#nestedSparkIcon" x="32" y="28" width="28" height="28" />
+
+    <text x="72" y="50" font-family="Inter" font-size="22" font-weight="600" fill="#F8FAFC" data-metric-title="revenue">
+      Quarterly Revenue Trend
+    </text>
+
+    <text x="32" y="102" font-family="JetBrains Mono" font-size="34" font-weight="700" fill="#38BDF8">
+      <tspan>$148,920</tspan>
+      <tspan dx="16" font-size="16" fill="#22C55E">+18.4%</tspan>
+    </text>
+
+    <g transform="translate(40, 160)">
+      <path d="M0 240 L180 180 L360 200 L560 95 L780 40" fill="none" stroke="#38BDF8" stroke-width="3.5" stroke-dasharray="8 5" marker-start="url(#dotStart)" marker-end="url(#arrowEnd)" />
+      <line x1="0" y1="260" x2="800" y2="260" stroke="#475569" stroke-width="1.5" marker-mid="url(#nestedTickMarker)" />
+      <circle cx="560" cy="95" r="14" fill="#38BDF8" fill-opacity="0.25" filter="url(#nestedSoftBlur)" />
+    </g>
+  </g>
+</svg>

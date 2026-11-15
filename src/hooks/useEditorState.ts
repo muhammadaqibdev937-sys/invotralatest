@@ -74,11 +74,19 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
     undo: rawUndo,
     redo: rawRedo,
     resetHistory,
+    breakCoalesce,
   } = useHistory<SvgEditorDocumentStateV1>(null);
 
   const [saveStatus, setSaveStatus] = useState<SaveStatus>(
     isAvailable ? 'ready' : 'unavailable'
   );
+  const saveStatusRef = useRef<SaveStatus>(saveStatus);
+  const updateSaveStatus = useCallback((next: SaveStatus) => {
+    if (saveStatusRef.current === next) return;
+    saveStatusRef.current = next;
+    setSaveStatus(next);
+  }, []);
+
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const [restoredFromDraft, setRestoredFromDraft] = useState(false);
 
@@ -89,16 +97,20 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
     const pending = pendingWriteRef.current;
     if (!pending || !isAvailable) return false;
     const ok = writeItem(pending.key, pending.state);
+    // Clear pending flags regardless of quota success so failed writes never re-trigger an infinite save loop
+    pendingWriteRef.current = null;
+    isDirtyRef.current = false;
     if (ok) {
-      pendingWriteRef.current = null;
-      isDirtyRef.current = false;
       setLastSavedAt(new Date());
-      setSaveStatus('saved');
+      updateSaveStatus('saved');
     } else {
-      setSaveStatus('unavailable');
+      updateSaveStatus('unavailable');
     }
     return ok;
-  }, [isAvailable, writeItem]);
+  }, [isAvailable, writeItem, updateSaveStatus]);
+
+  const flushPendingSaveRef = useRef(flushPendingSave);
+  flushPendingSaveRef.current = flushPendingSave;
 
   useEffect(() => {
     if (!loaded) {
@@ -120,38 +132,42 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
     resetHistory(initial);
     setRestoredFromDraft(restored);
     setLastSavedAt(null);
-    setSaveStatus(isAvailable ? (restored ? 'saved' : 'ready') : 'unavailable');
+    updateSaveStatus(isAvailable ? (restored ? 'saved' : 'ready') : 'unavailable');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded?.id, loaded?.designVersion]);
 
+  const loadedId = loaded?.id ?? null;
+
   useEffect(() => {
-    if (!loaded || !docState) return;
+    if (!loadedId || !docState) return;
     if (!isAvailable) {
-      setSaveStatus('unavailable');
+      isDirtyRef.current = false;
+      pendingWriteRef.current = null;
+      updateSaveStatus('unavailable');
       return;
     }
     if (!isDirtyRef.current) return;
 
-    const key = storageKeyForSvgDesign(loaded.id);
+    const key = storageKeyForSvgDesign(loadedId);
     pendingWriteRef.current = { key, state: docState };
-    setSaveStatus('saving');
+    updateSaveStatus('saving');
 
     const timer = window.setTimeout(() => {
-      flushPendingSave();
-    }, 180);
+      flushPendingSaveRef.current();
+    }, 400);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [docState, loaded, isAvailable, flushPendingSave]);
+  }, [docState, loadedId, isAvailable, updateSaveStatus]);
 
   useEffect(() => {
     const handleFlush = () => {
-      flushPendingSave();
+      flushPendingSaveRef.current();
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        flushPendingSave();
+        flushPendingSaveRef.current();
       }
     };
 
@@ -159,12 +175,12 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
     window.addEventListener('pagehide', handleFlush);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
-      flushPendingSave();
+      flushPendingSaveRef.current();
       window.removeEventListener('beforeunload', handleFlush);
       window.removeEventListener('pagehide', handleFlush);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [flushPendingSave]);
+  }, []);
 
   const commitDirty = useCallback(
     (updater: (prev: SvgEditorDocumentStateV1) => SvgEditorDocumentStateV1, coalesceKey = '') => {
@@ -307,13 +323,18 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
           if (fill !== 'none') {
             nextAttrs = setNodeStyleProp({ attrs: nextAttrs }, 'fill-opacity', null, hasCss);
           }
-          const nextTspans = node.tspans?.map((ts) => {
-            if (ts.attrs.fill !== undefined || ts.attrs.class || ts.attrs.style?.includes('fill')) {
-              return { ...ts, attrs: setNodeStyleProp({ attrs: ts.attrs }, 'fill', fill, hasCss) };
-            }
-            return ts;
-          });
-          return { ...node, attrs: nextAttrs, tspans: nextTspans };
+          const mapTspans = (list: typeof node.tspans) =>
+            list?.map((ts) => {
+              if (ts.attrs.fill !== undefined || ts.attrs.class || ts.attrs.style?.includes('fill')) {
+                return { ...ts, attrs: setNodeStyleProp({ attrs: ts.attrs }, 'fill', fill, hasCss) };
+              }
+              return ts;
+            });
+          const nextTspans = mapTspans(node.tspans);
+          const nextTextPath = node.textPath
+            ? { ...node.textPath, tspans: mapTspans(node.textPath.tspans) }
+            : undefined;
+          return { ...node, attrs: nextAttrs, tspans: nextTspans, textPath: nextTextPath };
         },
         coalesce ? `fill:${nodeId}` : ''
       );
@@ -846,8 +867,8 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
     resetHistory(fresh);
     setRestoredFromDraft(false);
     setLastSavedAt(null);
-    setSaveStatus(isAvailable ? 'ready' : 'unavailable');
-  }, [loaded, removeItem, resetHistory, isAvailable]);
+    updateSaveStatus(isAvailable ? 'ready' : 'unavailable');
+  }, [loaded, removeItem, resetHistory, isAvailable, updateSaveStatus]);
 
   return {
     docState,
@@ -892,5 +913,6 @@ export function useEditorState(loaded: LoadedTemplateV1 | null) {
     undo,
     redo,
     resetToOriginal,
+    commitUndoBoundary: breakCoalesce,
   };
 }

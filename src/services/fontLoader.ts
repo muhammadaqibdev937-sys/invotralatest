@@ -477,6 +477,48 @@ const FONT_LOADERS: Record<
       '400-normal': () => import('@fontsource/satisfy/files/satisfy-latin-400-normal.woff?url'),
     },
   },
+  'Bebas Neue': {
+    loadCss: () => import('@fontsource/bebas-neue/400.css'),
+    variants: {
+      '400-normal': () => import('@fontsource/bebas-neue/files/bebas-neue-latin-400-normal.woff?url'),
+    },
+  },
+  Inter: {
+    loadCss: () =>
+      Promise.all([
+        import('@fontsource/inter/300.css'),
+        import('@fontsource/inter/400.css'),
+        import('@fontsource/inter/500.css'),
+        import('@fontsource/inter/600.css'),
+        import('@fontsource/inter/700.css'),
+        import('@fontsource/inter/400-italic.css'),
+      ]),
+    variants: {
+      '300-normal': () => import('@fontsource/inter/files/inter-latin-300-normal.woff?url'),
+      '400-normal': () => import('@fontsource/inter/files/inter-latin-400-normal.woff?url'),
+      '500-normal': () => import('@fontsource/inter/files/inter-latin-500-normal.woff?url'),
+      '600-normal': () => import('@fontsource/inter/files/inter-latin-600-normal.woff?url'),
+      '700-normal': () => import('@fontsource/inter/files/inter-latin-700-normal.woff?url'),
+      '400-italic': () => import('@fontsource/inter/files/inter-latin-400-italic.woff?url'),
+    },
+  },
+  'JetBrains Mono': {
+    loadCss: () =>
+      Promise.all([
+        import('@fontsource/jetbrains-mono/400.css'),
+        import('@fontsource/jetbrains-mono/500.css'),
+        import('@fontsource/jetbrains-mono/600.css'),
+        import('@fontsource/jetbrains-mono/700.css'),
+        import('@fontsource/jetbrains-mono/400-italic.css'),
+      ]),
+    variants: {
+      '400-normal': () => import('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-normal.woff?url'),
+      '500-normal': () => import('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-500-normal.woff?url'),
+      '600-normal': () => import('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-600-normal.woff?url'),
+      '700-normal': () => import('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-700-normal.woff?url'),
+      '400-italic': () => import('@fontsource/jetbrains-mono/files/jetbrains-mono-latin-400-italic.woff?url'),
+    },
+  },
 };
 
 export const SUPPORTED_FONTS: SupportedFontDefinition[] = SUPPORTED_FONT_CATALOG.map((entry) => {

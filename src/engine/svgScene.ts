@@ -1,4 +1,9 @@
-import { resolveFontFamily } from './fonts';
+import {
+  isFontAvailableInBrowser,
+  resolveFontFamily,
+  SceneFontScanSummary,
+  summarizeFontUsage,
+} from './fonts';
 import { sanitizeSvgDocument } from './sanitizeSvg';
 
 export type SvgSupportedTag =
@@ -28,6 +33,12 @@ export interface SvgTspanNode {
   attrs: Record<string, string>;
 }
 
+export interface SvgTextPathNode {
+  attrs: Record<string, string>;
+  textContent?: string;
+  tspans?: SvgTspanNode[];
+}
+
 export interface SvgTransformState {
   tx: number;
   ty: number;
@@ -48,8 +59,10 @@ export interface SvgSceneNode {
   locked: boolean;
   attrs: Record<string, string>;
   children?: SvgSceneNode[];
+  inlineDefs?: SvgStaticNode[];
   textContent?: string;
   tspans?: SvgTspanNode[];
+  textPath?: SvgTextPathNode;
   staticNode?: SvgStaticNode;
   transform: SvgTransformState;
   isBackground?: boolean;
@@ -543,6 +556,121 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+function parseFiniteAttrNum(val: string | undefined): number | null {
+  if (val === undefined || val === '') return null;
+  const n = parseFloat(val);
+  return Number.isFinite(n) ? n : null;
+}
+
+export function estimateNodeLocalCenter(
+  node: SvgSceneNode,
+  scene: Pick<SvgSceneDocument, 'vbX' | 'vbY' | 'vbW' | 'vbH'>
+): { x: number; y: number } {
+  const attrs = node.attrs;
+  if (node.tag === 'rect' || node.tag === 'image' || node.tag === 'use') {
+    const x = parseFiniteAttrNum(attrs.x) ?? 0;
+    const y = parseFiniteAttrNum(attrs.y) ?? 0;
+    const w = parseFiniteAttrNum(attrs.width) ?? 0;
+    const h = parseFiniteAttrNum(attrs.height) ?? 0;
+    if (w > 0 || h > 0) {
+      return { x: x + w / 2, y: y + h / 2 };
+    }
+  }
+  if (node.tag === 'circle' || node.tag === 'ellipse') {
+    const cx = parseFiniteAttrNum(attrs.cx);
+    const cy = parseFiniteAttrNum(attrs.cy);
+    if (cx !== null || cy !== null) {
+      return { x: cx ?? 0, y: cy ?? 0 };
+    }
+  }
+  if (node.tag === 'line') {
+    const x1 = parseFiniteAttrNum(attrs.x1) ?? 0;
+    const y1 = parseFiniteAttrNum(attrs.y1) ?? 0;
+    const x2 = parseFiniteAttrNum(attrs.x2) ?? 0;
+    const y2 = parseFiniteAttrNum(attrs.y2) ?? 0;
+    return { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+  }
+  if ((node.tag === 'polygon' || node.tag === 'polyline') && attrs.points) {
+    const nums = attrs.points.match(/-?\d*\.?\d+(?:e[-+]?\d+)?/gi)?.map(Number) ?? [];
+    if (nums.length >= 4) {
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i + 1 < nums.length; i += 2) {
+        if (!Number.isFinite(nums[i]) || !Number.isFinite(nums[i + 1])) continue;
+        minX = Math.min(minX, nums[i]);
+        maxX = Math.max(maxX, nums[i]);
+        minY = Math.min(minY, nums[i + 1]);
+        maxY = Math.max(maxY, nums[i + 1]);
+      }
+      if (Number.isFinite(minX) && Number.isFinite(minY)) {
+        return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+      }
+    }
+  }
+  if (node.tag === 'text') {
+    const firstTspan = node.textPath?.tspans?.[0] ?? node.tspans?.[0];
+    const x = parseFiniteAttrNum(attrs.x ?? firstTspan?.attrs.x);
+    const y = parseFiniteAttrNum(attrs.y ?? firstTspan?.attrs.y);
+    if (x !== null || y !== null) {
+      return {
+        x: x ?? scene.vbX + scene.vbW / 2,
+        y: y ?? scene.vbY + scene.vbH / 2,
+      };
+    }
+  }
+  if (node.tag === 'g' && node.children && node.children.length > 0) {
+    const pts = node.children
+      .filter((ch) => ch.visible && !ch.isBackground)
+      .map((ch) => estimateNodeLocalCenter(ch, scene));
+    if (pts.length > 0) {
+      const avgX = pts.reduce((acc, p) => acc + p.x, 0) / pts.length;
+      const avgY = pts.reduce((acc, p) => acc + p.y, 0) / pts.length;
+      return { x: avgX, y: avgY };
+    }
+  }
+  return {
+    x: scene.vbX + scene.vbW / 2,
+    y: scene.vbY + scene.vbH / 2,
+  };
+}
+
+export function resolveTransformPivotPatch(
+  node: Pick<SvgSceneNode, 'transform'>,
+  localCenter: { x: number; y: number }
+): Partial<SvgTransformState> {
+  if (node.transform.pivotX !== undefined && node.transform.pivotY !== undefined) {
+    return {
+      pivotX: node.transform.pivotX,
+      pivotY: node.transform.pivotY,
+    };
+  }
+  const cx = round2(localCenter.x);
+  const cy = round2(localCenter.y);
+  const hasExistingRotOrScale =
+    Math.abs(node.transform.rotation) > 0.001 ||
+    Math.abs(node.transform.scaleX - 1) > 0.001 ||
+    Math.abs(node.transform.scaleY - 1) > 0.001;
+
+  if (!hasExistingRotOrScale) {
+    return { pivotX: cx, pivotY: cy };
+  }
+
+  // Keep the visual center pinned when upgrading an unpivoted rotate/scale transform to centered-pivot
+  const rad = (node.transform.rotation * Math.PI) / 180;
+  const sx = cx * node.transform.scaleX;
+  const sy = cy * node.transform.scaleY;
+  const rx = sx * Math.cos(rad) - sy * Math.sin(rad);
+  const ry = sx * Math.sin(rad) + sy * Math.cos(rad);
+  return {
+    pivotX: cx,
+    pivotY: cy,
+    tx: round2(node.transform.tx + (rx - cx)),
+    ty: round2(node.transform.ty + (ry - cy)),
+  };
+}
+
 function humanizeId(raw: string): string {
   return raw
     .replace(/^(layer[-_]?|text[-_]?|field[-_]?)/i, '')
@@ -990,9 +1118,7 @@ export function parseSvgToScene(rawSvg: string, fallbackName = 'Custom Design'):
     }
 
     if (DEFS_CONTAINER_TAGS.has(tag)) {
-      if (isTopLevel) {
-        defsNodes.push(convertDomToStaticNode(el));
-      }
+      defsNodes.push(convertDomToStaticNode(el));
       return [];
     }
 
@@ -1096,9 +1222,15 @@ export function parseSvgToScene(rawSvg: string, fallbackName = 'Custom Design'):
         attrs,
         transform,
       };
+      const inlineDefs: SvgStaticNode[] = [];
       const children: SvgSceneNode[] = [];
       for (const child of Array.from(el.children)) {
-        children.push(...parseVisualElement(child, false, [...ancestorNodes, groupStub]));
+        const cTag = child.tagName.toLowerCase();
+        if (DEFS_CONTAINER_TAGS.has(cTag)) {
+          inlineDefs.push(convertDomToStaticNode(child));
+        } else {
+          children.push(...parseVisualElement(child, false, [...ancestorNodes, groupStub]));
+        }
       }
       let inferredGroupLabel = '';
       if (!explicitLabel && isGenericId(rawId)) {
@@ -1123,6 +1255,7 @@ export function parseSvgToScene(rawSvg: string, fallbackName = 'Custom Design'):
           visible,
           locked,
           attrs,
+          inlineDefs: inlineDefs.length > 0 ? inlineDefs : undefined,
           children,
           transform,
         },
@@ -1130,11 +1263,90 @@ export function parseSvgToScene(rawSvg: string, fallbackName = 'Custom Design'):
     }
 
     if (svgTag === 'text') {
+      const childNodes = Array.from(el.childNodes);
+      const textPathEl = childNodes.find(
+        (n) => n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName.toLowerCase() === 'textpath'
+      ) as Element | undefined;
+
+      if (textPathEl) {
+        const tpAttrs = extractElementAttrs(textPathEl, new Set());
+        const tpChildNodes = Array.from(textPathEl.childNodes);
+        const tpHasTspan = tpChildNodes.some(
+          (n) => n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName.toLowerCase() === 'tspan'
+        );
+        const tpTspans: SvgTspanNode[] = [];
+        let tpDirectText = '';
+
+        if (tpHasTspan) {
+          tpChildNodes.forEach((child, idx) => {
+            if (child.nodeType === Node.ELEMENT_NODE) {
+              const childEl = child as Element;
+              if (childEl.tagName.toLowerCase() === 'tspan') {
+                tpTspans.push({
+                  id: `${id}_tp_ts_${idx}`,
+                  text: childEl.textContent ?? '',
+                  attrs: extractElementAttrs(childEl, new Set()),
+                });
+              }
+            } else if (child.nodeType === Node.TEXT_NODE) {
+              const txt = (child.textContent ?? '').replace(/\s+/g, ' ').trim();
+              if (txt) {
+                tpTspans.push({
+                  id: `${id}_tp_ts_${idx}`,
+                  text: txt,
+                  attrs: {},
+                });
+              }
+            }
+          });
+        } else {
+          const joined = tpChildNodes
+            .filter(
+              (c) =>
+                c.nodeType === Node.TEXT_NODE ||
+                (c.nodeType === Node.ELEMENT_NODE &&
+                  !['title', 'desc', 'metadata'].includes((c as Element).tagName.toLowerCase()))
+            )
+            .map((c) => c.textContent ?? '')
+            .join('');
+          tpDirectText =
+            attrs['xml:space'] === 'preserve' || tpAttrs['xml:space'] === 'preserve'
+              ? joined
+              : joined.replace(/\s+/g, ' ').trim();
+        }
+
+        const fullSnippet = (
+          tpHasTspan ? tpTspans.map((t) => t.text).join(' ') : tpDirectText
+        )
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        const rawSizeNum = parseFloat((attrs['font-size'] || '36').replace(/px|pt|em/gi, '')) || 36;
+        const label =
+          explicitLabel || inferTextSemanticLabel(fullSnippet, rawSizeNum, rawId);
+
+        return [
+          {
+            id,
+            tag: 'text',
+            label,
+            visible,
+            locked,
+            attrs,
+            textPath: {
+              attrs: tpAttrs,
+              tspans: tpHasTspan ? tpTspans : undefined,
+              textContent: tpHasTspan ? undefined : tpDirectText,
+            },
+            transform,
+          },
+        ];
+      }
+
       const tspans: SvgTspanNode[] = [];
       let directText = '';
 
       // Walk childNodes in document order to preserve tspans and direct text
-      const childNodes = Array.from(el.childNodes);
       const hasTspanChild = childNodes.some(
         (n) => n.nodeType === Node.ELEMENT_NODE && (n as Element).tagName.toLowerCase() === 'tspan'
       );
@@ -1150,12 +1362,6 @@ export function parseSvgToScene(rawSvg: string, fallbackName = 'Custom Design'):
                 id: `${id}_ts_${idx}`,
                 text: childEl.textContent ?? '',
                 attrs: tAttrs,
-              });
-            } else if (cTag === 'textpath') {
-              tspans.push({
-                id: `${id}_ts_${idx}`,
-                text: childEl.textContent ?? '',
-                attrs: {},
               });
             }
           } else if (child.nodeType === Node.TEXT_NODE) {
@@ -1312,6 +1518,10 @@ export function findNodeWithAncestors(
   return null;
 }
 
+export function getNodeTspans(node: SvgSceneNode): SvgTspanNode[] | undefined {
+  return node.textPath?.tspans ?? node.tspans;
+}
+
 export function getTextNodeProperties(
   node: SvgSceneNode,
   cssRules: Record<string, Record<string, string>> = {},
@@ -1336,18 +1546,27 @@ export function getTextNodeProperties(
   x: number;
   y: number;
 } {
-  const tspans = node.tspans ?? [];
+  const tspans = node.textPath?.tspans ?? node.tspans ?? [];
   const firstTspan = tspans[0];
 
   const lines =
     tspans.length > 0
       ? tspans.map((t) => t.text)
-      : [node.textContent ?? ''];
+      : [node.textPath ? node.textPath.textContent ?? '' : node.textContent ?? ''];
   const fullText = lines.join('\n');
 
   const resolveTextProp = (prop: string): string | null => {
     const onText = getEffectiveNodeProp(node, prop, cssRules, ancestors);
     if (onText) return onText;
+    if (node.textPath) {
+      const onPath = getEffectiveNodeProp(
+        { attrs: node.textPath.attrs, tag: 'textPath' },
+        prop,
+        cssRules,
+        [...ancestors, node]
+      );
+      if (onPath) return onPath;
+    }
     if (firstTspan) {
       const onSpan = getEffectiveNodeProp(
         { attrs: firstTspan.attrs, tag: 'tspan' },
@@ -1437,6 +1656,39 @@ export function getTextNodeProperties(
   };
 }
 
+export function scanSceneFontUsage(
+  scene: SvgSceneDocument,
+  checkBrowserAvailable: (fontFamily: string) => boolean = isFontAvailableInBrowser
+): SceneFontScanSummary {
+  const entries = collectTextNodesWithAncestors(scene.nodes);
+  const usages: Array<{ rawFont: string | null | undefined; nodeId: string }> = [];
+
+  for (const { node, ancestors } of entries) {
+    const props = getTextNodeProperties(node, scene.cssRules, ancestors);
+    usages.push({
+      rawFont: props.isFontFallback ? props.originalFontFamily : props.fontFamily,
+      nodeId: node.id,
+    });
+
+    const spanList = getNodeTspans(node);
+    if (spanList && spanList.length > 1) {
+      for (const tspan of spanList.slice(1)) {
+        const tspanFont = getEffectiveNodeProp(
+          { attrs: tspan.attrs, tag: 'tspan' },
+          'font-family',
+          scene.cssRules,
+          [...ancestors, node]
+        );
+        if (tspanFont) {
+          usages.push({ rawFont: tspanFont, nodeId: node.id });
+        }
+      }
+    }
+  }
+
+  return summarizeFontUsage(usages, checkBrowserAvailable);
+}
+
 export interface TextEditPatch {
   text?: string;
   tspanIndex?: number;
@@ -1461,8 +1713,22 @@ export function applyTextEditToNode(
 ): SvgSceneNode {
   if (node.tag !== 'text') return node;
   let nextAttrs = { ...node.attrs };
-  let nextTspans = node.tspans ? node.tspans.map((t) => ({ ...t, attrs: { ...t.attrs } })) : undefined;
-  let nextTextContent = node.textContent;
+  const isTextPath = Boolean(node.textPath);
+  let nextTextPath: SvgTextPathNode | undefined = node.textPath
+    ? {
+        attrs: { ...node.textPath.attrs },
+        textContent: node.textPath.textContent,
+        tspans: node.textPath.tspans
+          ? node.textPath.tspans.map((t) => ({ ...t, attrs: { ...t.attrs } }))
+          : undefined,
+      }
+    : undefined;
+  let nextTspans = nextTextPath
+    ? nextTextPath.tspans
+    : node.tspans
+    ? node.tspans.map((t) => ({ ...t, attrs: { ...t.attrs } }))
+    : undefined;
+  let nextTextContent = nextTextPath ? nextTextPath.textContent : node.textContent;
   const props = getTextNodeProperties(node, cssRules, ancestors);
 
   // Edit single tspan text directly
@@ -1470,7 +1736,7 @@ export function applyTextEditToNode(
     nextTspans[patch.tspanIndex].text = patch.tspanText;
   }
 
-  // Edit full text (preserving existing tspans & positions/styles line-by-line)
+  // Edit full text (preserving existing tspans, textPath curve, and positions/styles)
   if (patch.text !== undefined) {
     const newLines = patch.text.split('\n');
     const step = round2(props.fontSize * props.lineHeight);
@@ -1478,7 +1744,7 @@ export function applyTextEditToNode(
 
     if (nextTspans && nextTspans.length > 0) {
       const updated: SvgTspanNode[] = [];
-      const count = Math.max(1, newLines.length);
+      const count = isTextPath ? Math.min(nextTspans.length, Math.max(1, newLines.length)) : Math.max(1, newLines.length);
       for (let i = 0; i < count; i++) {
         const lineText = newLines[i] ?? '';
         if (i < nextTspans.length) {
@@ -1496,8 +1762,15 @@ export function applyTextEditToNode(
           });
         }
       }
+      if (isTextPath && newLines.length > nextTspans.length && updated.length > 0) {
+        const lastIdx = updated.length - 1;
+        updated[lastIdx] = {
+          ...updated[lastIdx],
+          text: [updated[lastIdx].text, ...newLines.slice(updated.length)].join(' ').trim(),
+        };
+      }
       nextTspans = updated;
-    } else if (newLines.length > 1) {
+    } else if (!isTextPath && newLines.length > 1) {
       nextTextContent = undefined;
       nextTspans = newLines.map((lineText, idx) => ({
         id: `${node.id}_ts_${idx}`,
@@ -1508,7 +1781,7 @@ export function applyTextEditToNode(
         },
       }));
     } else {
-      nextTextContent = patch.text;
+      nextTextContent = isTextPath ? patch.text.replace(/\n+/g, ' ') : patch.text;
     }
   }
 
@@ -1561,6 +1834,9 @@ export function applyTextEditToNode(
   }
   if (patch.textAnchor !== undefined) {
     nextAttrs = setNodeStyleProp({ attrs: nextAttrs }, 'text-anchor', patch.textAnchor, hasCss);
+    if (nextTextPath && nextTextPath.attrs['text-anchor'] !== undefined) {
+      nextTextPath.attrs['text-anchor'] = patch.textAnchor;
+    }
     syncTspanStyleProp('text-anchor', patch.textAnchor);
   }
   if (patch.letterSpacing !== undefined) {
@@ -1596,6 +1872,20 @@ export function applyTextEditToNode(
     if (!node.attrs['data-label'] && !node.attrs.id && firstLine) {
       nextLabel = firstLine.slice(0, 28);
     }
+  }
+
+  if (nextTextPath) {
+    nextTextPath = {
+      ...nextTextPath,
+      tspans: nextTspans,
+      textContent: nextTspans ? undefined : nextTextContent,
+    };
+    return {
+      ...node,
+      label: nextLabel,
+      attrs: nextAttrs,
+      textPath: nextTextPath,
+    };
   }
 
   return {
@@ -1664,6 +1954,20 @@ function cloneNodeTree(node: SvgSceneNode, offsetStep: number, isRootClone: bool
       id: `${newId}_ts_${i}`,
       attrs: { ...t.attrs },
     })),
+    textPath: node.textPath
+      ? {
+          attrs: { ...node.textPath.attrs },
+          textContent: node.textPath.textContent,
+          tspans: node.textPath.tspans?.map((t, i) => ({
+            ...t,
+            id: `${newId}_tp_ts_${i}`,
+            attrs: { ...t.attrs },
+          })),
+        }
+      : undefined,
+    inlineDefs: node.inlineDefs
+      ? (JSON.parse(JSON.stringify(node.inlineDefs)) as SvgStaticNode[])
+      : undefined,
     children: node.children?.map((c) => cloneNodeTree(c, 0, false)),
   };
 }
@@ -2458,26 +2762,37 @@ export function recolorNodesMatchingHex(
         if (nextAttrs !== nextNode.attrs) {
           nextNode = { ...nextNode, attrs: nextAttrs };
         }
+        const recolorTspanList = (tspans: SvgTspanNode[]) =>
+          tspans.map((ts) => {
+            const tsFill = normalizeColorToHex(
+              getEffectiveNodeProp(
+                { attrs: ts.attrs, tag: 'tspan' },
+                'fill',
+                cssRules,
+                [...ancestors, node]
+              )
+            );
+            if (tsFill === target) {
+              return {
+                ...ts,
+                attrs: setNodeStyleProp({ attrs: ts.attrs }, 'fill', toHex, hasCss),
+              };
+            }
+            return ts;
+          });
         if (nextNode.tspans) {
           nextNode = {
             ...nextNode,
-            tspans: nextNode.tspans.map((ts) => {
-              const tsFill = normalizeColorToHex(
-                getEffectiveNodeProp(
-                  { attrs: ts.attrs, tag: 'tspan' },
-                  'fill',
-                  cssRules,
-                  [...ancestors, node]
-                )
-              );
-              if (tsFill === target) {
-                return {
-                  ...ts,
-                  attrs: setNodeStyleProp({ attrs: ts.attrs }, 'fill', toHex, hasCss),
-                };
-              }
-              return ts;
-            }),
+            tspans: recolorTspanList(nextNode.tspans),
+          };
+        }
+        if (nextNode.textPath?.tspans) {
+          nextNode = {
+            ...nextNode,
+            textPath: {
+              ...nextNode.textPath,
+              tspans: recolorTspanList(nextNode.textPath.tspans),
+            },
           };
         }
       }
@@ -2529,7 +2844,14 @@ function serializeStaticNode(node: SvgStaticNode, indent = '  '): string {
   return `${indent}<${node.tag}${attrStr}>\n${inner}\n${indent}</${node.tag}>`;
 }
 
-function serializeSceneNode(node: SvgSceneNode, indent = '  '): string {
+function serializeSceneNode(
+  node: SvgSceneNode,
+  indent = '  ',
+  options: { transparentBackground?: boolean } = {}
+): string {
+  if (options.transparentBackground && node.isBackground) {
+    return '';
+  }
   const attrs: Record<string, string> = { ...node.attrs };
 
   if (node.label && !attrs['data-label']) {
@@ -2560,21 +2882,37 @@ function serializeSceneNode(node: SvgSceneNode, indent = '  '): string {
   }
 
   if (node.tag === 'g') {
+    const inlineDefsMarkup = (node.inlineDefs ?? []).map((d) =>
+      serializeStaticNode(d, `${indent}  `)
+    );
     const childrenMarkup = (node.children ?? [])
-      .map((c) => serializeSceneNode(c, `${indent}  `))
-      .join('\n');
-    return `${indent}<g${attrStr}>\n${childrenMarkup}\n${indent}</g>`;
+      .map((c) => serializeSceneNode(c, `${indent}  `, options))
+      .filter(Boolean);
+    const inner = [...inlineDefsMarkup, ...childrenMarkup].join('\n');
+    return `${indent}<g${attrStr}>\n${inner}\n${indent}</g>`;
   }
 
   if (node.tag === 'text') {
+    const activeSpans = node.textPath?.tspans ?? node.tspans;
+    const activeDirect = node.textPath ? node.textPath.textContent : node.textContent;
     const needsPreserveSpace =
       attrs['xml:space'] === 'preserve' ||
-      (node.tspans && node.tspans.some((ts) => /  |^\s|\s$/.test(ts.text))) ||
-      (!node.tspans && /  |^\s|\s$/.test(node.textContent ?? ''));
+      (activeSpans && activeSpans.some((ts) => /  |^\s|\s$/.test(ts.text))) ||
+      (!activeSpans && /  |^\s|\s$/.test(activeDirect ?? ''));
     if (needsPreserveSpace && !attrs['xml:space']) {
       attrs['xml:space'] = 'preserve';
     }
     const textAttrStr = serializeAttrs(attrs);
+    if (node.textPath) {
+      const tpAttrStr = serializeAttrs(node.textPath.attrs);
+      const tpInner =
+        node.textPath.tspans && node.textPath.tspans.length > 0
+          ? node.textPath.tspans
+              .map((ts) => `<tspan${serializeAttrs(ts.attrs)}>${escapeXml(ts.text)}</tspan>`)
+              .join('')
+          : escapeXml(node.textPath.textContent ?? '');
+      return `${indent}<text${textAttrStr}><textPath${tpAttrStr}>${tpInner}</textPath></text>`;
+    }
     if (node.tspans && node.tspans.length > 0) {
       const tspansMarkup = node.tspans
         .map((ts) => `<tspan${serializeAttrs(ts.attrs)}>${escapeXml(ts.text)}</tspan>`)
@@ -2585,6 +2923,84 @@ function serializeSceneNode(node: SvgSceneNode, indent = '  '): string {
   }
 
   return `${indent}<${node.tag}${attrStr} />`;
+}
+
+function collectPatternIdsFromStatic(nodes: SvgStaticNode[], out: Set<string>): void {
+  for (const s of nodes) {
+    if (s.tag.toLowerCase() === 'pattern' && s.attrs.id) {
+      out.add(s.attrs.id);
+    }
+    if (s.children.length > 0) {
+      collectPatternIdsFromStatic(s.children, out);
+    }
+  }
+}
+
+export function getNodeAdvancedCapabilities(
+  node: SvgSceneNode,
+  scene: SvgSceneDocument,
+  ancestors: SvgSceneNode[] = []
+): string[] {
+  const caps: string[] = [];
+  const checkProp = (prop: string): string | null =>
+    getEffectiveNodeProp(node, prop, scene.cssRules, ancestors);
+
+  const filterVal = checkProp('filter');
+  if (filterVal && filterVal.trim().toLowerCase() !== 'none') {
+    caps.push('filter');
+  }
+
+  const maskVal = checkProp('mask') ?? checkProp('mask-image');
+  if (maskVal && maskVal.trim().toLowerCase() !== 'none') {
+    caps.push('mask');
+  }
+
+  const clipVal = checkProp('clip-path');
+  if (clipVal && clipVal.trim().toLowerCase() !== 'none') {
+    caps.push('clip-path');
+  }
+
+  const patternIds = new Set<string>();
+  collectPatternIdsFromStatic(scene.defsNodes, patternIds);
+  const walkInlineDefs = (list: SvgSceneNode[]) => {
+    for (const n of list) {
+      if (n.inlineDefs) collectPatternIdsFromStatic(n.inlineDefs, patternIds);
+      if (n.children) walkInlineDefs(n.children);
+    }
+  };
+  walkInlineDefs(scene.nodes);
+
+  const fillVal = checkProp('fill') ?? '';
+  const strokeVal = checkProp('stroke') ?? '';
+  const extractUrlId = (v: string): string | null => {
+    const m = v.match(/url\(\s*#([^)\s]+)\s*\)/i);
+    return m ? m[1] : null;
+  };
+  const fillRef = extractUrlId(fillVal);
+  const strokeRef = extractUrlId(strokeVal);
+  if ((fillRef && patternIds.has(fillRef)) || (strokeRef && patternIds.has(strokeRef))) {
+    caps.push('pattern');
+  }
+
+  if (node.tag === 'text' && node.textPath) {
+    caps.push('textPath');
+  }
+
+  if (node.tag === 'use') {
+    caps.push('use');
+  }
+
+  return caps;
+}
+
+export function formatNodeCapabilityNotice(
+  node: SvgSceneNode,
+  scene: SvgSceneDocument,
+  ancestors: SvgSceneNode[] = []
+): string | null {
+  const caps = getNodeAdvancedCapabilities(node, scene, ancestors);
+  if (caps.length === 0) return null;
+  return `This layer uses ${caps.join(', ')}; editing may be limited.`;
 }
 
 export function serializeSceneToSvg(
@@ -2608,7 +3024,12 @@ export function serializeSceneToSvg(
 
   // Ensure xmlns:xlink if any xlink:href exists in serialized body
   const defsMarkup = scene.defsNodes.map((d) => serializeStaticNode(d, '  ')).join('\n');
-  const nodesMarkup = scene.nodes.map((n) => serializeSceneNode(n, '  ')).join('\n');
+  const nodesMarkup = scene.nodes
+    .map((n) =>
+      serializeSceneNode(n, '  ', { transparentBackground: options.transparentBackground })
+    )
+    .filter(Boolean)
+    .join('\n');
 
   if (defsMarkup.includes('xlink:href') || nodesMarkup.includes('xlink:href')) {
     rootAttrs['xmlns:xlink'] = 'http://www.w3.org/1999/xlink';

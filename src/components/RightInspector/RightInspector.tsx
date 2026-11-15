@@ -40,6 +40,7 @@ import {
   Unlock,
   Upload,
 } from 'lucide-react';
+import { isFontAvailableInBrowser } from '../../engine/fonts';
 import { TextAnchor } from '../../engine/schema';
 import {
   AlignMode,
@@ -52,7 +53,9 @@ import {
   collectAllNodes,
   extractBackgroundConfig,
   findNodeWithAncestors,
+  formatNodeCapabilityNotice,
   getEffectiveNodeProp,
+  getNodeTspans,
   getSceneStats,
   getTextNodeProperties,
   normalizeColorToHex,
@@ -63,6 +66,7 @@ import {
 } from '../../engine/svgScene';
 import { VECTOR_PRESETS, VectorPresetItem } from '../../engine/vectorLibrary';
 import { getFontDefinition } from '../../services/fontLoader';
+import { LiveTextControl } from '../Editor/LiveTextControl';
 import { FontFamilyDropdown } from '../FontPicker/FontFamilyDropdown';
 
 export type { AlignMode, AlignReference, DistributeAxis };
@@ -73,6 +77,7 @@ interface RightInspectorProps {
   selectedIds: string[];
   onSelectNodes: (ids: string[]) => void;
   onUpdateTextNode: (nodeId: string, patch: TextEditPatch, coalesce?: boolean) => void;
+  onCommitTextBoundary?: () => void;
   onUpdateNodeTransform: (
     nodeId: string,
     patch: Partial<SvgTransformState>,
@@ -105,6 +110,7 @@ interface RightInspectorProps {
   onSetTransparentBackground: (transparent: boolean) => void;
   onPreviewFont?: (nodeId: string, fontFamily: string | null) => void;
   onOpenFontStudio: () => void;
+  onOpenUploadFont?: (preferredMissingFont?: string) => void;
   onOpenBackgroundTab: () => void;
 }
 
@@ -123,6 +129,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   selectedIds,
   onSelectNodes,
   onUpdateTextNode,
+  onCommitTextBoundary,
   onUpdateNodeTransform,
   onSetNodeFill,
   onSetNodeStroke,
@@ -151,6 +158,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   onSetTransparentBackground,
   onPreviewFont,
   onOpenFontStudio,
+  onOpenUploadFont,
   onOpenBackgroundTab,
 }) => {
   const primaryId = selectedIds[0] ?? null;
@@ -268,10 +276,10 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
       <div
         role="region"
         aria-label="Canvas alignment controls"
-        className="space-y-2 pt-2.5 border-t border-[#292929]"
+        className="space-y-2 pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929]"
       >
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] font-medium text-[#999999]">
+          <span className="text-[11px] font-medium text-[#52525B] dark:text-[#999999]">
             {effectiveRef === 'canvas' ? 'Align to Canvas' : 'Align Selection'}
           </span>
 
@@ -279,7 +287,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             <div
               role="group"
               aria-label="Alignment target"
-              className="inline-flex rounded border border-[#292929] bg-[#0D0D0D] overflow-hidden"
+              className="inline-flex rounded border border-[#E4E4E7] bg-[#F4F4F5] dark:border-[#292929] dark:bg-[#0D0D0D] overflow-hidden"
             >
               {(['canvas', 'selection'] as const).map((refOpt) => (
                 <button
@@ -288,8 +296,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   onClick={() => setAlignReference(refOpt)}
                   className={`px-2 py-0.5 text-[10px] font-medium capitalize cursor-pointer transition-colors ${
                     alignReference === refOpt
-                      ? 'bg-[#E5E5E5] text-[#090909]'
-                      : 'text-[#999999] hover:text-[#F5F5F5]'
+                      ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+                      : 'text-[#52525B] hover:text-[#111111] dark:text-[#999999] dark:hover:text-[#F5F5F5]'
                   }`}
                 >
                   {refOpt}
@@ -309,7 +317,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               title={btn.title}
               aria-label={btn.title}
               onClick={() => onAlignNodes(targetIds, btn.id, effectiveRef)}
-              className="h-8 px-1.5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] hover:border-[#C0C0C0] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[11px] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed transition-colors"
+              className="h-8 px-1.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] hover:border-[#A1A1AA] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[11px] cursor-pointer disabled:cursor-not-allowed transition-colors"
             >
               {btn.icon}
               <span>{btn.label}</span>
@@ -327,7 +335,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               title={btn.title}
               aria-label={btn.title}
               onClick={() => onAlignNodes(targetIds, btn.id, effectiveRef)}
-              className="h-8 px-1.5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] hover:border-[#C0C0C0] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[11px] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed transition-colors"
+              className="h-8 px-1.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] hover:border-[#A1A1AA] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[11px] cursor-pointer disabled:cursor-not-allowed transition-colors"
             >
               {btn.icon}
               <span>{btn.label}</span>
@@ -342,9 +350,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           title={`Center Vertically & Horizontally relative to ${refLabel}`}
           aria-label={`Center Vertically and Horizontally relative to ${refLabel}`}
           onClick={() => onAlignNodes(targetIds, 'center-both', effectiveRef)}
-          className="w-full h-8 px-2.5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] hover:border-[#C0C0C0] disabled:opacity-35 inline-flex items-center justify-center gap-1.5 text-[11px] font-medium text-[#E5E5E5] cursor-pointer disabled:cursor-not-allowed transition-colors"
+          className="w-full h-8 px-2.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] hover:border-[#A1A1AA] text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] dark:text-[#E5E5E5] disabled:opacity-35 inline-flex items-center justify-center gap-1.5 text-[11px] font-medium cursor-pointer disabled:cursor-not-allowed transition-colors"
         >
-          <Crosshair className="w-3.5 h-3.5 text-[#C0C0C0] shrink-0" />
+          <Crosshair className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0] shrink-0" />
           <span>Center H &amp; V ({refLabel})</span>
         </button>
 
@@ -354,7 +362,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               type="button"
               disabled={!hasUnlockedTarget}
               onClick={() => onDistributeNodes(targetIds, 'horizontal')}
-              className="h-8 px-2 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 text-[11px] text-[#E5E5E5] inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              className="h-8 px-2 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#E5E5E5] disabled:opacity-35 text-[11px] inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
             >
               <AlignHorizontalDistributeCenter className="w-3.5 h-3.5" />
               <span>Distribute H</span>
@@ -363,7 +371,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               type="button"
               disabled={!hasUnlockedTarget}
               onClick={() => onDistributeNodes(targetIds, 'vertical')}
-              className="h-8 px-2 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 text-[11px] text-[#E5E5E5] inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
+              className="h-8 px-2 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#E5E5E5] disabled:opacity-35 text-[11px] inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-not-allowed"
             >
               <AlignVerticalDistributeCenter className="w-3.5 h-3.5" />
               <span>Distribute V</span>
@@ -402,15 +410,23 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
     };
 
     return (
-      <div className="pt-2.5 border-t border-[#292929] space-y-2.5">
+      <div className="pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929] space-y-2.5">
         <div className="flex items-center justify-between">
-          <span className="text-[11px] font-medium text-[#999999]">Position, Size &amp; Rotation</span>
+          <span className="text-[11px] font-medium text-[#52525B] dark:text-[#999999]">Position, Size &amp; Rotation</span>
           <button
             type="button"
             onClick={() =>
-              onUpdateNodeTransform(node.id, { tx: 0, ty: 0, scaleX: 1, scaleY: 1, rotation: 0 })
+              onUpdateNodeTransform(node.id, {
+                tx: 0,
+                ty: 0,
+                scaleX: 1,
+                scaleY: 1,
+                rotation: 0,
+                pivotX: undefined,
+                pivotY: undefined,
+              })
             }
-            className="text-[11px] text-[#C0C0C0] hover:text-[#F5F5F5] inline-flex items-center gap-1 cursor-pointer"
+            className="text-[11px] text-[#52525B] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] inline-flex items-center gap-1 cursor-pointer"
           >
             <RotateCcw className="w-3 h-3" />
             <span>Reset</span>
@@ -419,34 +435,34 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
         <div className="grid grid-cols-2 gap-2">
           <label className="space-y-0.5 block">
-            <span className="text-[10px] text-[#737373]">Offset X</span>
+            <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Offset X</span>
             <input
               type="number"
               value={Math.round(node.transform.tx)}
               onChange={(e) =>
                 onUpdateNodeTransform(node.id, { tx: Number(e.target.value) || 0 }, true)
               }
-              className="w-full h-7 px-2 rounded border border-[#292929] bg-[#0D0D0D] text-xs font-mono text-[#F5F5F5]"
+              className="w-full h-7 px-2 rounded border border-[#E4E4E7] bg-white text-xs font-mono text-[#111111] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5]"
             />
           </label>
           <label className="space-y-0.5 block">
-            <span className="text-[10px] text-[#737373]">Offset Y</span>
+            <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Offset Y</span>
             <input
               type="number"
               value={Math.round(node.transform.ty)}
               onChange={(e) =>
                 onUpdateNodeTransform(node.id, { ty: Number(e.target.value) || 0 }, true)
               }
-              className="w-full h-7 px-2 rounded border border-[#292929] bg-[#0D0D0D] text-xs font-mono text-[#F5F5F5]"
+              className="w-full h-7 px-2 rounded border border-[#E4E4E7] bg-white text-xs font-mono text-[#111111] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5]"
             />
           </label>
         </div>
 
         <div className="space-y-2">
           <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px] text-[#999999]">
+            <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
               <span>Scale</span>
-              <span className="tabular-nums text-[#E5E5E5]">{scaleMagPct}%</span>
+              <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">{scaleMagPct}%</span>
             </div>
             <input
               type="range"
@@ -459,12 +475,12 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 const s = Number(e.target.value) / 100;
                 onUpdateNodeTransform(node.id, { scaleX: signX * s, scaleY: signY * s }, true);
               }}
-              className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+              className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
             />
           </div>
 
           <div className="space-y-1">
-            <div className="flex items-center justify-between text-[11px] text-[#999999]">
+            <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
               <span>Rotate</span>
               <div className="flex items-center gap-1.5">
                 <button
@@ -472,7 +488,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   title="Rotate 90° counter-clockwise"
                   aria-label="Rotate 90 degrees left"
                   onClick={() => handleRotate(-90)}
-                  className="px-1.5 h-5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] text-[10px] text-[#C0C0C0] hover:text-[#F5F5F5] inline-flex items-center gap-0.5 cursor-pointer"
+                  className="px-1.5 h-5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[10px] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] inline-flex items-center gap-0.5 cursor-pointer"
                 >
                   <RotateCcw className="w-2.5 h-2.5" />
                   <span>90°</span>
@@ -482,12 +498,12 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   title="Rotate 90° clockwise"
                   aria-label="Rotate 90 degrees right"
                   onClick={() => handleRotate(90)}
-                  className="px-1.5 h-5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] text-[10px] text-[#C0C0C0] hover:text-[#F5F5F5] inline-flex items-center gap-0.5 cursor-pointer"
+                  className="px-1.5 h-5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[10px] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] inline-flex items-center gap-0.5 cursor-pointer"
                 >
                   <RotateCw className="w-2.5 h-2.5" />
                   <span>90°</span>
                 </button>
-                <span className="tabular-nums text-[#E5E5E5] min-w-[30px] text-right">
+                <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5] min-w-[30px] text-right">
                   {Math.round(node.transform.rotation)}°
                 </span>
               </div>
@@ -502,7 +518,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               onChange={(e) =>
                 onUpdateNodeTransform(node.id, { rotation: Number(e.target.value) }, true)
               }
-              className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+              className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
             />
           </div>
 
@@ -514,8 +530,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               aria-pressed={signX < 0}
               className={`h-8 px-2 rounded border text-[11px] inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
                 signX < 0
-                  ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5] font-semibold'
-                  : 'bg-[#151515] text-[#C0C0C0] border-[#292929] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                  ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5] font-semibold'
+                  : 'bg-[#FAFAFA] text-[#3F3F46] border-[#E4E4E7] hover:bg-[#F4F4F5] hover:text-[#111111] dark:bg-[#151515] dark:text-[#C0C0C0] dark:border-[#292929] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
               }`}
             >
               <FlipHorizontal2 className="w-3.5 h-3.5" />
@@ -527,8 +543,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               aria-pressed={signY < 0}
               className={`h-8 px-2 rounded border text-[11px] inline-flex items-center justify-center gap-1.5 cursor-pointer transition-colors ${
                 signY < 0
-                  ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5] font-semibold'
-                  : 'bg-[#151515] text-[#C0C0C0] border-[#292929] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                  ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5] font-semibold'
+                  : 'bg-[#FAFAFA] text-[#3F3F46] border-[#E4E4E7] hover:bg-[#F4F4F5] hover:text-[#111111] dark:bg-[#151515] dark:text-[#C0C0C0] dark:border-[#292929] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
               }`}
             >
               <FlipVertical2 className="w-3.5 h-3.5" />
@@ -543,6 +559,11 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   const renderElementHeaderAndActions = (node: SvgSceneNode) => {
     const canFwd = canReorderNode(scene.nodes, node.id, 'forward');
     const canBack = canReorderNode(scene.nodes, node.id, 'backward');
+    const capabilityNotice = formatNodeCapabilityNotice(
+      node,
+      scene,
+      primaryInfo?.node.id === node.id ? primaryInfo.ancestors : []
+    );
     return (
       <div className="space-y-2.5">
         <div className="flex items-center gap-1.5">
@@ -555,9 +576,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onKeyDown={(e) => {
               if (e.key === 'Enter') e.currentTarget.blur();
             }}
-            className="flex-1 min-w-0 h-8 px-2.5 rounded border border-[#292929] bg-[#0D0D0D] text-xs font-medium text-[#F5F5F5] focus:outline-none focus:border-[#C0C0C0]"
+            className="flex-1 min-w-0 h-8 px-2.5 rounded border border-[#E4E4E7] bg-white text-xs font-medium text-[#111111] focus:outline-none focus:border-[#18181B] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5] dark:focus:border-[#C0C0C0]"
           />
-          <span className="text-[10px] font-mono px-1.5 py-1 rounded bg-[#151515] border border-[#292929] text-[#999999] shrink-0">
+          <span className="text-[10px] font-mono px-1.5 py-1 rounded bg-[#F4F4F5] border border-[#E4E4E7] text-[#52525B] dark:bg-[#151515] dark:border-[#292929] dark:text-[#999999] shrink-0">
             &lt;{node.rawTag || node.tag}&gt;
           </span>
         </div>
@@ -569,7 +590,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onReorderNode(node.id, 'front')}
             title="Bring to Front"
             aria-label="Bring to Front"
-            className="h-7 px-1 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed"
+            className="h-7 px-1 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] cursor-pointer disabled:cursor-not-allowed"
           >
             <ChevronsUp className="w-3 h-3 shrink-0" />
             <span>Front</span>
@@ -580,7 +601,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onReorderNode(node.id, 'forward')}
             title="Bring Forward"
             aria-label="Bring Forward"
-            className="h-7 px-1 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed"
+            className="h-7 px-1 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] cursor-pointer disabled:cursor-not-allowed"
           >
             <ArrowUp className="w-3 h-3 shrink-0" />
             <span>Fwd</span>
@@ -591,7 +612,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onReorderNode(node.id, 'backward')}
             title="Send Backward"
             aria-label="Send Backward"
-            className="h-7 px-1 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed"
+            className="h-7 px-1 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] cursor-pointer disabled:cursor-not-allowed"
           >
             <ArrowDown className="w-3 h-3 shrink-0" />
             <span>Back</span>
@@ -602,7 +623,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onReorderNode(node.id, 'back')}
             title="Send to Back"
             aria-label="Send to Back"
-            className="h-7 px-1 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed"
+            className="h-7 px-1 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] disabled:opacity-35 inline-flex items-center justify-center gap-1 text-[10px] cursor-pointer disabled:cursor-not-allowed"
           >
             <ChevronsDown className="w-3 h-3 shrink-0" />
             <span>Bottom</span>
@@ -615,7 +636,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onCopyNodes([node.id])}
             title="Copy (Ctrl+C)"
             aria-label="Copy"
-            className="h-8 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] flex items-center justify-center text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer"
+            className="h-8 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] flex items-center justify-center dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer"
           >
             <Copy className="w-3.5 h-3.5" />
           </button>
@@ -624,7 +645,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onDuplicateNodes([node.id])}
             title="Duplicate (Ctrl+D)"
             aria-label="Duplicate"
-            className="h-8 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] flex items-center justify-center text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer"
+            className="h-8 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] flex items-center justify-center dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
           </button>
@@ -635,8 +656,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             aria-label={node.visible ? 'Hide element' : 'Show element'}
             className={`h-8 rounded border flex items-center justify-center cursor-pointer ${
               !node.visible
-                ? 'bg-[#E5E5E5] border-[#E5E5E5] text-[#090909]'
-                : 'bg-[#151515] border-[#292929] text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                ? 'bg-[#18181B] border-[#18181B] text-white dark:bg-[#E5E5E5] dark:border-[#E5E5E5] dark:text-[#090909]'
+                : 'bg-[#FAFAFA] border-[#E4E4E7] text-[#3F3F46] hover:bg-[#F4F4F5] hover:text-[#111111] dark:bg-[#151515] dark:border-[#292929] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
             }`}
           >
             {node.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
@@ -648,8 +669,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             aria-label={node.locked ? 'Unlock' : 'Lock'}
             className={`h-8 rounded border flex items-center justify-center cursor-pointer ${
               node.locked
-                ? 'bg-[#E5E5E5] border-[#E5E5E5] text-[#090909]'
-                : 'bg-[#151515] border-[#292929] text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                ? 'bg-[#18181B] border-[#18181B] text-white dark:bg-[#E5E5E5] dark:border-[#E5E5E5] dark:text-[#090909]'
+                : 'bg-[#FAFAFA] border-[#E4E4E7] text-[#3F3F46] hover:bg-[#F4F4F5] hover:text-[#111111] dark:bg-[#151515] dark:border-[#292929] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
             }`}
           >
             {node.locked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
@@ -660,11 +681,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             onClick={() => onDeleteNodes([node.id])}
             title={node.locked ? 'Unlock to delete' : 'Delete (Del)'}
             aria-label="Delete"
-            className="h-8 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] disabled:opacity-35 flex items-center justify-center text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed"
+            className="h-8 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] disabled:opacity-35 flex items-center justify-center dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer disabled:cursor-not-allowed"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
         </div>
+
+        {capabilityNotice && (
+          <div
+            data-testid="layer-capability-badge"
+            className="px-2.5 py-1.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] text-[11px] text-[#52525B] dark:border-[#292929] dark:bg-[#151515] dark:text-[#999999] leading-snug"
+          >
+            {capabilityNotice}
+          </div>
+        )}
       </div>
     );
   };
@@ -672,22 +702,22 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
   return (
     <aside
       aria-label="Properties inspector"
-      className="w-full lg:w-80 lg:border-l overflow-y-auto ea-scrollbar shrink-0 bg-[#101010] border-[#292929] p-4 space-y-5"
+      className="w-full lg:w-80 lg:border-l overflow-y-auto ea-scrollbar shrink-0 bg-white border-[#E4E4E7] dark:bg-[#101010] dark:border-[#292929] p-4 space-y-5"
     >
       {/* 1. MULTI-SELECTION INSPECTOR */}
       {selectedIds.length > 1 && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
-              <h2 className="text-sm font-medium text-[#F5F5F5]">
+              <h2 className="text-sm font-medium text-[#111111] dark:text-[#F5F5F5]">
                 {selectedIds.length} Elements Selected
               </h2>
-              <p className="text-[11px] text-[#999999]">Align, distribute, or group together.</p>
+              <p className="text-[11px] text-[#52525B] dark:text-[#999999]">Align, distribute, or group together.</p>
             </div>
             <button
               type="button"
               onClick={() => onSelectNodes([])}
-              className="text-xs text-[#999999] hover:text-[#F5F5F5] cursor-pointer"
+              className="text-xs text-[#52525B] hover:text-[#111111] dark:text-[#999999] dark:hover:text-[#F5F5F5] cursor-pointer"
             >
               Clear
             </button>
@@ -702,11 +732,11 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             })
           )}
 
-          <div className="grid grid-cols-2 gap-1.5 pt-2 border-t border-[#292929]">
+          <div className="grid grid-cols-2 gap-1.5 pt-2 border-t border-[#E4E4E7] dark:border-[#292929]">
             <button
               type="button"
               onClick={() => onGroupNodes(selectedIds)}
-              className="h-9 px-3 rounded border border-[#E5E5E5] bg-[#E5E5E5] hover:bg-[#C0C0C0] text-[#090909] text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="h-9 px-3 rounded border border-[#18181B] bg-[#18181B] hover:bg-[#27272A] text-white dark:border-[#E5E5E5] dark:bg-[#E5E5E5] dark:hover:bg-[#C0C0C0] dark:text-[#090909] text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Group className="w-3.5 h-3.5" />
               <span>Group</span>
@@ -714,7 +744,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             <button
               type="button"
               onClick={() => onCopyNodes(selectedIds)}
-              className="h-9 px-3 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] text-[#F5F5F5] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="h-9 px-3 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#F5F5F5] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Copy className="w-3.5 h-3.5" />
               <span>Copy</span>
@@ -722,7 +752,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             <button
               type="button"
               onClick={() => onDuplicateNodes(selectedIds)}
-              className="h-9 px-3 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] text-[#F5F5F5] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="h-9 px-3 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#F5F5F5] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Duplicate</span>
@@ -730,7 +760,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             <button
               type="button"
               onClick={() => onDeleteNodes(selectedIds)}
-              className="h-9 px-3 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] text-[#C0C0C0] hover:text-[#F5F5F5] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="h-9 px-3 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] text-xs font-medium inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>Delete</span>
@@ -742,18 +772,18 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
       {/* 2. PRESERVED UNSUPPORTED TAG INSPECTOR */}
       {selectedIds.length === 1 && primaryNode && primaryNode.isPreservedUnsupported && (
         <div className="space-y-4">
-          <div className="flex items-center gap-2 text-[#E5E5E5]">
+          <div className="flex items-center gap-2 text-[#111111] dark:text-[#E5E5E5]">
             <ShieldAlert className="w-4 h-4 shrink-0" />
             <h2 className="text-sm font-medium truncate">{primaryNode.label}</h2>
           </div>
-          <div className="p-3 rounded-lg border border-[#292929] bg-[#151515] text-xs leading-relaxed text-[#C0C0C0] space-y-2">
+          <div className="p-3 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] text-xs leading-relaxed text-[#3F3F46] dark:border-[#292929] dark:bg-[#151515] dark:text-[#C0C0C0] space-y-2">
             <p>
-              The element uses <code className="text-[#F5F5F5]">&lt;{primaryNode.rawTag}&gt;</code>, which is safely preserved in read-only mode so your SVG renders and exports without flattening.
+              The element uses <code className="text-[#111111] dark:text-[#F5F5F5]">&lt;{primaryNode.rawTag}&gt;</code>, which is safely preserved in read-only mode so your SVG renders and exports without flattening.
             </p>
             <button
               type="button"
               onClick={() => onToggleVisibility(primaryNode.id)}
-              className="w-full h-8 px-3 rounded border border-[#292929] bg-[#101010] hover:bg-[#252525] text-[#F5F5F5] inline-flex items-center justify-center gap-1.5 cursor-pointer"
+              className="w-full h-8 px-3 rounded border border-[#E4E4E7] bg-white hover:bg-[#F4F4F5] text-[#111111] dark:border-[#292929] dark:bg-[#101010] dark:hover:bg-[#252525] dark:text-[#F5F5F5] inline-flex items-center justify-center gap-1.5 cursor-pointer"
             >
               {primaryNode.visible ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
               <span>{primaryNode.visible ? 'Hide Element' : 'Show Element'}</span>
@@ -770,33 +800,58 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         textProps && (
           <div className="space-y-4">
             <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#999999] mb-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#52525B] dark:text-[#999999] mb-2">
                 Text Properties
               </h2>
               {renderElementHeaderAndActions(primaryNode)}
             </div>
 
-            {textProps.isFontFallback && (
-              <div className="p-2.5 rounded-md border border-[#C0C0C0]/40 bg-[#151515] text-[11px] text-[#C0C0C0] space-y-1.5">
-                <div className="flex items-start gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[#E5E5E5]" />
-                  <span>
-                    Original font <strong className="text-[#F5F5F5]">{textProps.originalFontFamily}</strong> is not bundled. Previewing with{' '}
-                    <strong className="text-[#F5F5F5]">{textProps.fallbackPreviewFamily}</strong>.
+            {textProps.isFontFallback &&
+              (isFontAvailableInBrowser(textProps.originalFontFamily) ? (
+                <div className="px-2.5 py-1.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] text-[11px] text-[#52525B] dark:border-[#292929] dark:bg-[#151515] dark:text-[#999999] flex items-center justify-between gap-2">
+                  <span className="leading-snug break-words">
+                    System font (<span className="text-[#111111] dark:text-[#C0C0C0]">{textProps.originalFontFamily}</span>) rendered by browser
                   </span>
+                  <button
+                    type="button"
+                    onClick={onOpenFontStudio}
+                    className="underline text-[#111111] dark:text-[#E5E5E5] shrink-0 cursor-pointer"
+                  >
+                    Replace
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={onOpenFontStudio}
-                  className="underline text-[#F5F5F5] cursor-pointer"
-                >
-                  Choose a bundled Google Font
-                </button>
-              </div>
-            )}
+              ) : (
+                <div className="p-2.5 rounded-md border border-[#A1A1AA] bg-[#FAFAFA] text-[11px] text-[#3F3F46] dark:border-[#C0C0C0]/40 dark:bg-[#151515] dark:text-[#C0C0C0] space-y-2">
+                  <div className="flex items-start gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-[#18181B] dark:text-[#E5E5E5]" />
+                    <span className="leading-relaxed break-words">
+                      <strong className="text-[#111111] dark:text-[#F5F5F5]">{textProps.originalFontFamily}</strong> is not bundled. Preview may look different — using fallback{' '}
+                      <strong className="text-[#111111] dark:text-[#F5F5F5]">{textProps.fallbackPreviewFamily}</strong> (original kept).
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={onOpenFontStudio}
+                      className="h-7 px-2.5 rounded border border-[#E4E4E7] bg-white hover:bg-[#F4F4F5] hover:border-[#A1A1AA] text-[11px] font-medium text-[#111111] dark:border-[#292929] dark:bg-[#101010] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] dark:text-[#F5F5F5] cursor-pointer"
+                    >
+                      Replace
+                    </button>
+                    {onOpenUploadFont && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenUploadFont(textProps.originalFontFamily)}
+                        className="h-7 px-2.5 rounded border border-[#E4E4E7] bg-white hover:bg-[#F4F4F5] hover:border-[#A1A1AA] text-[11px] font-medium text-[#111111] dark:border-[#292929] dark:bg-[#101010] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] dark:text-[#E5E5E5] cursor-pointer"
+                      >
+                        Upload font
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
 
             {primaryNode.locked ? (
-              <div className="p-3 rounded-lg border border-[#292929] bg-[#151515] text-xs text-[#999999]">
+              <div className="p-3 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] text-xs text-[#52525B] dark:border-[#292929] dark:bg-[#151515] dark:text-[#999999]">
                 This text layer is locked. Click Unlock above to edit.
               </div>
             ) : (
@@ -804,47 +859,63 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 {renderAlignControls([primaryNode.id])}
 
                 {/* Content */}
-                <div className="space-y-1.5 pt-2.5 border-t border-[#292929]">
-                  <span className="block text-[11px] font-medium text-[#999999]">Content</span>
-                  {primaryNode.tspans && primaryNode.tspans.length > 1 ? (
-                    <div className="space-y-1.5">
-                      {primaryNode.tspans.map((ts, idx) => (
-                        <input
-                          key={ts.id}
-                          type="text"
-                          aria-label={`Line ${idx + 1}`}
-                          value={ts.text}
-                          onChange={(e) =>
-                            onUpdateTextNode(
-                              primaryNode.id,
-                              { tspanIndex: idx, tspanText: e.target.value },
-                              true
-                            )
-                          }
-                          className="w-full h-8 px-2.5 rounded border border-[#292929] bg-[#0D0D0D] text-xs text-[#F5F5F5] focus:outline-none focus:border-[#C0C0C0]"
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <textarea
-                      rows={textProps.fullText.includes('\n') ? 3 : 2}
-                      value={textProps.fullText}
-                      onChange={(e) =>
-                        onUpdateTextNode(primaryNode.id, { text: e.target.value }, true)
-                      }
-                      className="w-full px-2.5 py-2 rounded border border-[#292929] bg-[#0D0D0D] text-xs text-[#F5F5F5] focus:outline-none focus:border-[#C0C0C0] resize-y"
-                    />
-                  )}
+                <div className="space-y-1.5 pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929]">
+                  <span className="block text-[11px] font-medium text-[#52525B] dark:text-[#999999]">Content</span>
+                  {(() => {
+                    const tspans = getNodeTspans(primaryNode);
+                    return tspans && tspans.length > 1 ? (
+                      <div className="space-y-1.5">
+                        {tspans.map((ts, idx) => (
+                          <LiveTextControl
+                            key={ts.id}
+                            as="input"
+                            type="text"
+                            nodeKey={`${primaryNode.id}:tspan:${ts.id}`}
+                            aria-label={`Line ${idx + 1}`}
+                            value={ts.text}
+                            onLiveChange={(nextVal) =>
+                              onUpdateTextNode(
+                                primaryNode.id,
+                                { tspanIndex: idx, tspanText: nextVal },
+                                true
+                              )
+                            }
+                            onCommitBoundary={onCommitTextBoundary}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Escape') e.currentTarget.blur();
+                            }}
+                            className="w-full h-8 px-2.5 rounded border border-[#E4E4E7] bg-white text-xs text-[#111111] focus:outline-none focus:border-[#18181B] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5] dark:focus:border-[#C0C0C0]"
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <LiveTextControl
+                        as="textarea"
+                        nodeKey={`${primaryNode.id}:full`}
+                        aria-label={`Edit ${primaryNode.label} content`}
+                        rows={textProps.fullText.includes('\n') ? 3 : 2}
+                        value={textProps.fullText}
+                        onLiveChange={(nextVal) =>
+                          onUpdateTextNode(primaryNode.id, { text: nextVal }, true)
+                        }
+                        onCommitBoundary={onCommitTextBoundary}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') e.currentTarget.blur();
+                        }}
+                        className="w-full px-2.5 py-2 rounded border border-[#E4E4E7] bg-white text-xs text-[#111111] focus:outline-none focus:border-[#18181B] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5] dark:focus:border-[#C0C0C0] resize-y"
+                      />
+                    );
+                  })()}
                 </div>
 
                 {/* Font & Style */}
-                <div className="space-y-2.5 pt-2.5 border-t border-[#292929]">
+                <div className="space-y-2.5 pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929]">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-medium text-[#999999]">Typography</span>
+                    <span className="text-[11px] font-medium text-[#52525B] dark:text-[#999999]">Typography</span>
                     <button
                       type="button"
                       onClick={onOpenFontStudio}
-                      className="text-[11px] underline text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer"
+                      className="text-[11px] underline text-[#3F3F46] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer"
                     >
                       Font Studio
                     </button>
@@ -867,8 +938,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
                   <div className="grid grid-cols-2 gap-2">
                     <div className="space-y-1">
-                      <span className="block text-[10px] text-[#737373]">Size (px)</span>
-                      <div className="flex items-center rounded border border-[#292929] bg-[#0D0D0D] overflow-hidden h-8">
+                      <span className="block text-[10px] text-[#71717A] dark:text-[#737373]">Size (px)</span>
+                      <div className="flex items-center rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D] overflow-hidden h-8">
                         <button
                           type="button"
                           title="Decrease font size"
@@ -878,7 +949,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                               fontSize: Math.max(6, Math.round(textProps.fontSize) - 2),
                             })
                           }
-                          className="w-7 h-full flex items-center justify-center text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5] border-r border-[#292929] cursor-pointer shrink-0"
+                          className="w-7 h-full flex items-center justify-center text-[#3F3F46] hover:bg-[#F4F4F5] hover:text-[#111111] border-r border-[#E4E4E7] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5] dark:border-[#292929] cursor-pointer shrink-0"
                         >
                           <Minus className="w-3 h-3" />
                         </button>
@@ -895,7 +966,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                               true
                             )
                           }
-                          className="w-full min-w-0 h-full px-1.5 bg-transparent text-center text-xs font-mono text-[#F5F5F5] focus:outline-none"
+                          className="w-full min-w-0 h-full px-1.5 bg-transparent text-center text-xs font-mono text-[#111111] dark:text-[#F5F5F5] focus:outline-none"
                         />
                         <button
                           type="button"
@@ -906,21 +977,21 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                               fontSize: Math.min(300, Math.round(textProps.fontSize) + 2),
                             })
                           }
-                          className="w-7 h-full flex items-center justify-center text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5] border-l border-[#292929] cursor-pointer shrink-0"
+                          className="w-7 h-full flex items-center justify-center text-[#3F3F46] hover:bg-[#F4F4F5] hover:text-[#111111] border-l border-[#E4E4E7] dark:text-[#C0C0C0] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5] dark:border-[#292929] cursor-pointer shrink-0"
                         >
                           <Plus className="w-3 h-3" />
                         </button>
                       </div>
                     </div>
                     <div className="space-y-1">
-                      <span className="block text-[10px] text-[#737373]">Weight</span>
+                      <span className="block text-[10px] text-[#71717A] dark:text-[#737373]">Weight</span>
                       <select
                         aria-label="Font weight"
                         value={textProps.fontWeight}
                         onChange={(e) =>
                           onUpdateTextNode(primaryNode.id, { fontWeight: e.target.value })
                         }
-                        className="w-full h-8 px-2 rounded border border-[#292929] bg-[#0D0D0D] text-xs text-[#F5F5F5] cursor-pointer"
+                        className="w-full h-8 px-2 rounded border border-[#E4E4E7] bg-white text-xs text-[#111111] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5] cursor-pointer"
                       >
                         <option value="300">Light (300)</option>
                         <option value="400">Regular (400)</option>
@@ -943,8 +1014,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         }
                         className={`w-8 h-8 rounded border text-xs font-bold cursor-pointer ${
                           Number(textProps.fontWeight) >= 600
-                            ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5]'
-                            : 'bg-[#151515] text-[#C0C0C0] border-[#292929]'
+                            ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5]'
+                            : 'bg-[#FAFAFA] text-[#3F3F46] border-[#E4E4E7] dark:bg-[#151515] dark:text-[#C0C0C0] dark:border-[#292929]'
                         }`}
                       >
                         B
@@ -960,8 +1031,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                           }
                           className={`w-8 h-8 rounded border text-xs italic cursor-pointer ${
                             textProps.fontStyle === 'italic'
-                              ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5]'
-                              : 'bg-[#151515] text-[#C0C0C0] border-[#292929]'
+                              ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5]'
+                              : 'bg-[#FAFAFA] text-[#3F3F46] border-[#E4E4E7] dark:bg-[#151515] dark:text-[#C0C0C0] dark:border-[#292929]'
                           }`}
                         >
                           I
@@ -978,15 +1049,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         aria-label="Underline text"
                         className={`w-8 h-8 rounded border flex items-center justify-center cursor-pointer ${
                           textProps.textDecoration === 'underline'
-                            ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5]'
-                            : 'bg-[#151515] text-[#C0C0C0] border-[#292929]'
+                            ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5]'
+                            : 'bg-[#FAFAFA] text-[#3F3F46] border-[#E4E4E7] dark:bg-[#151515] dark:text-[#C0C0C0] dark:border-[#292929]'
                         }`}
                       >
                         <Underline className="w-3.5 h-3.5" />
                       </button>
                     </div>
 
-                    <div className="inline-flex rounded border border-[#292929] overflow-hidden">
+                    <div className="inline-flex rounded border border-[#E4E4E7] dark:border-[#292929] overflow-hidden">
                       {(
                         [
                           { val: 'start', icon: <AlignLeft className="w-3.5 h-3.5" />, lbl: 'Align left' },
@@ -1001,8 +1072,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                           onClick={() => onUpdateTextNode(primaryNode.id, { textAnchor: a.val })}
                           className={`w-8 h-8 flex items-center justify-center cursor-pointer ${
                             textProps.textAnchor === a.val
-                              ? 'bg-[#E5E5E5] text-[#090909]'
-                              : 'bg-[#151515] text-[#999999] hover:bg-[#252525]'
+                              ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+                              : 'bg-[#FAFAFA] text-[#52525B] hover:bg-[#F4F4F5] dark:bg-[#151515] dark:text-[#999999] dark:hover:bg-[#252525]'
                           }`}
                         >
                           {a.icon}
@@ -1013,11 +1084,11 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
                   {/* Quick Text Case */}
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] text-[#999999]">Text Case</span>
+                    <span className="text-[11px] text-[#52525B] dark:text-[#999999]">Text Case</span>
                     <div
                       role="group"
                       aria-label="Transform text case"
-                      className="inline-flex rounded border border-[#292929] overflow-hidden"
+                      className="inline-flex rounded border border-[#E4E4E7] dark:border-[#292929] overflow-hidden"
                     >
                       {(
                         [
@@ -1052,8 +1123,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                           title={c.title}
                           aria-label={c.title}
                           onClick={() => {
-                            if (primaryNode.tspans && primaryNode.tspans.length > 1) {
-                              primaryNode.tspans.forEach((ts, tIdx) => {
+                            const tspans = getNodeTspans(primaryNode);
+                            if (tspans && tspans.length > 1) {
+                              tspans.forEach((ts, tIdx) => {
                                 onUpdateTextNode(
                                   primaryNode.id,
                                   { tspanIndex: tIdx, tspanText: c.fn(ts.text) },
@@ -1066,8 +1138,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                               });
                             }
                           }}
-                          className={`h-7 px-2.5 text-[11px] font-medium bg-[#151515] hover:bg-[#252525] text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer ${
-                            idx > 0 ? 'border-l border-[#292929]' : ''
+                          className={`h-7 px-2.5 text-[11px] font-medium bg-[#FAFAFA] hover:bg-[#F4F4F5] text-[#3F3F46] hover:text-[#111111] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer ${
+                            idx > 0 ? 'border-l border-[#E4E4E7] dark:border-[#292929]' : ''
                           }`}
                         >
                           {c.label}
@@ -1078,9 +1150,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
                   {/* Letter Spacing + Line Spacing */}
                   <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                    <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                       <span>Letter Spacing</span>
-                      <span className="tabular-nums text-[#E5E5E5]">{textProps.letterSpacing}px</span>
+                      <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">{textProps.letterSpacing}px</span>
                     </div>
                     <input
                       type="range"
@@ -1095,15 +1167,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                           true
                         )
                       }
-                      className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                      className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                     />
                   </div>
 
                   {textProps.hasMultipleTspans && (
                     <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                      <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                         <span>Line Spacing</span>
-                        <span className="tabular-nums text-[#E5E5E5]">
+                        <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">
                           {textProps.lineHeight.toFixed(2)}×
                         </span>
                       </div>
@@ -1120,14 +1192,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                             true
                           )
                         }
-                        className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                        className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                       />
                     </div>
                   )}
 
                   {/* Text Color + Opacity */}
                   <div className="flex items-center justify-between gap-2 pt-1">
-                    <span className="text-[11px] text-[#999999]">Color</span>
+                    <span className="text-[11px] text-[#52525B] dark:text-[#999999]">Color</span>
                     <div className="flex items-center gap-2">
                       <input
                         type="color"
@@ -1140,18 +1212,18 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                             true
                           )
                         }
-                        className="w-7 h-7 rounded border border-[#292929] cursor-pointer bg-[#0D0D0D] p-0"
+                        className="w-7 h-7 rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D] cursor-pointer p-0"
                       />
-                      <span className="text-xs font-mono text-[#C0C0C0] uppercase">
+                      <span className="text-xs font-mono text-[#3F3F46] dark:text-[#C0C0C0] uppercase">
                         {textProps.color}
                       </span>
                     </div>
                   </div>
 
                   <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                    <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                       <span>Text Opacity</span>
-                      <span className="tabular-nums text-[#E5E5E5]">
+                      <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">
                         {Math.round(textProps.opacity * 100)}%
                       </span>
                     </div>
@@ -1168,7 +1240,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                           true
                         )
                       }
-                      className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                      className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                     />
                   </div>
                 </div>
@@ -1186,14 +1258,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         primaryNode.tag === 'image' && (
           <div className="space-y-4">
             <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#999999] mb-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#52525B] dark:text-[#999999] mb-2">
                 Image Properties
               </h2>
               {renderElementHeaderAndActions(primaryNode)}
             </div>
 
             {primaryNode.locked ? (
-              <div className="p-3 rounded-lg border border-[#292929] bg-[#151515] text-xs text-[#999999]">
+              <div className="p-3 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] text-xs text-[#52525B] dark:border-[#292929] dark:bg-[#151515] dark:text-[#999999]">
                 This image is locked. Click Unlock above to modify or replace it.
               </div>
             ) : (
@@ -1201,7 +1273,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 {renderAlignControls([primaryNode.id])}
 
                 {(primaryNode.attrs.href || primaryNode.attrs['xlink:href']) && (
-                  <div className="p-2 rounded-lg border border-[#292929] bg-[#0D0D0D] flex items-center justify-center max-h-36 overflow-hidden">
+                  <div className="p-2 rounded-lg border border-[#E4E4E7] bg-[#F4F4F5] dark:border-[#292929] dark:bg-[#0D0D0D] flex items-center justify-center max-h-36 overflow-hidden">
                     <img
                       src={primaryNode.attrs.href || primaryNode.attrs['xlink:href']}
                       alt={primaryNode.label}
@@ -1240,16 +1312,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 <button
                   type="button"
                   onClick={() => replaceImgRef.current?.click()}
-                  className="w-full h-9 px-3 rounded-md border border-[#E5E5E5] bg-[#E5E5E5] hover:bg-[#C0C0C0] text-[#090909] text-xs font-semibold inline-flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full h-9 px-3 rounded-md border border-[#18181B] bg-[#18181B] hover:bg-[#27272A] text-white dark:border-[#E5E5E5] dark:bg-[#E5E5E5] dark:hover:bg-[#C0C0C0] dark:text-[#090909] text-xs font-semibold inline-flex items-center justify-center gap-2 cursor-pointer"
                 >
                   <Upload className="w-3.5 h-3.5" />
                   <span>Replace Image</span>
                 </button>
-                {imageError && <p className="text-[11px] text-[#E5E5E5]">{imageError}</p>}
+                {imageError && <p className="text-[11px] text-[#111111] dark:text-[#E5E5E5]">{imageError}</p>}
 
                 {/* Fit / Crop Mode */}
                 <div className="space-y-1.5">
-                  <span className="block text-[11px] font-medium text-[#999999]">
+                  <span className="block text-[11px] font-medium text-[#52525B] dark:text-[#999999]">
                     Fit &amp; Crop Mode
                   </span>
                   <div className="grid grid-cols-3 gap-1">
@@ -1268,8 +1340,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                           onClick={() => onSetImageFitMode(primaryNode.id, m.val)}
                           className={`h-8 rounded border text-xs cursor-pointer ${
                             current === m.val
-                              ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5] font-semibold'
-                              : 'bg-[#151515] text-[#C0C0C0] border-[#292929] hover:bg-[#252525]'
+                              ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5] font-semibold'
+                              : 'bg-[#FAFAFA] text-[#3F3F46] border-[#E4E4E7] hover:bg-[#F4F4F5] dark:bg-[#151515] dark:text-[#C0C0C0] dark:border-[#292929] dark:hover:bg-[#252525]'
                           }`}
                         >
                           {m.label}
@@ -1281,9 +1353,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
                 {/* Opacity */}
                 <div className="space-y-1">
-                  <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                  <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                     <span>Opacity</span>
-                    <span className="tabular-nums text-[#E5E5E5]">
+                    <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">
                       {Math.round((Number.isFinite(primaryOpacity) ? primaryOpacity : 1) * 100)}%
                     </span>
                   </div>
@@ -1296,11 +1368,11 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     onChange={(e) =>
                       onSetNodeOpacity(primaryNode.id, Number(e.target.value), true)
                     }
-                    className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                    className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                   />
                 </div>
 
-                <p className="text-[11px] text-[#737373] leading-relaxed">
+                <p className="text-[11px] text-[#71717A] dark:text-[#737373] leading-relaxed">
                   Aspect ratio stays proportional when dragging corner handles. Pixel-level painting or retouching is not supported.
                 </p>
 
@@ -1317,7 +1389,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         primaryNode.tag === 'g' && (
           <div className="space-y-4">
             <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#999999] mb-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#52525B] dark:text-[#999999] mb-2">
                 Group Properties
               </h2>
               {renderElementHeaderAndActions(primaryNode)}
@@ -1327,7 +1399,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <button
                 type="button"
                 onClick={() => onUngroupNode(primaryNode.id)}
-                className="w-full h-9 px-3 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] text-xs font-medium text-[#E5E5E5] inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                className="w-full h-9 px-3 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-xs font-medium text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#E5E5E5] inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
                 <Ungroup className="w-3.5 h-3.5" />
                 <span>Ungroup ({primaryNode.children?.length ?? 0} elements)</span>
@@ -1337,7 +1409,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             {/* Children quick selection */}
             {primaryNode.children && primaryNode.children.length > 0 && (
               <div className="space-y-1.5">
-                <span className="block text-[11px] font-medium text-[#999999]">
+                <span className="block text-[11px] font-medium text-[#52525B] dark:text-[#999999]">
                   Elements Inside Group (click to edit)
                 </span>
                 <div className="max-h-36 overflow-y-auto ea-scrollbar space-y-1 pr-1">
@@ -1346,13 +1418,13 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       key={ch.id}
                       type="button"
                       onClick={() => onSelectNodes([ch.id])}
-                      className="w-full px-2.5 py-1.5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] flex items-center justify-between gap-2 text-xs text-[#E5E5E5] cursor-pointer"
+                      className="w-full px-2.5 py-1.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-xs text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] flex items-center justify-between gap-2 dark:text-[#E5E5E5] cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-1.5 min-w-0">
-                        <Folder className="w-3 h-3 text-[#999999] shrink-0" />
+                        <Folder className="w-3 h-3 text-[#52525B] dark:text-[#999999] shrink-0" />
                         <span className="truncate">{ch.label}</span>
                       </span>
-                      <ChevronRight className="w-3.5 h-3.5 text-[#737373] shrink-0" />
+                      <ChevronRight className="w-3.5 h-3.5 text-[#71717A] dark:text-[#737373] shrink-0" />
                     </button>
                   ))}
                 </div>
@@ -1363,9 +1435,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <>
                 {renderAlignControls([primaryNode.id])}
 
-                <div className="pt-2.5 border-t border-[#292929] space-y-2.5">
+                <div className="pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929] space-y-2.5">
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-medium text-[#999999]">Batch Fill Tint</span>
+                    <span className="text-[11px] font-medium text-[#52525B] dark:text-[#999999]">Batch Fill Tint</span>
                     <div className="flex items-center gap-1.5">
                       <input
                         type="color"
@@ -1380,15 +1452,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                             }
                           }
                         }}
-                        className="w-7 h-7 rounded border border-[#292929] cursor-pointer bg-[#0D0D0D] p-0"
+                        className="w-7 h-7 rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D] cursor-pointer p-0"
                       />
                     </div>
                   </div>
 
                   <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                    <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                       <span>Group Opacity</span>
-                      <span className="tabular-nums text-[#E5E5E5]">
+                      <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">
                         {Math.round((Number.isFinite(primaryOpacity) ? primaryOpacity : 1) * 100)}%
                       </span>
                     </div>
@@ -1401,7 +1473,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       onChange={(e) =>
                         onSetNodeOpacity(primaryNode.id, Number(e.target.value), true)
                       }
-                      className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                      className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                     />
                   </div>
                 </div>
@@ -1421,20 +1493,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
         primaryNode.tag !== 'g' && (
           <div className="space-y-4">
             <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#999999] mb-2">
+              <h2 className="text-xs font-semibold uppercase tracking-wider text-[#52525B] dark:text-[#999999] mb-2">
                 {primaryNode.isBackground ? 'Background Shape Properties' : 'Shape & Icon Properties'}
               </h2>
               {renderElementHeaderAndActions(primaryNode)}
             </div>
 
             {primaryNode.locked ? (
-              <div className="p-3 rounded-lg border border-[#292929] bg-[#151515] text-xs text-[#999999] space-y-2">
+              <div className="p-3 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] text-xs text-[#52525B] dark:border-[#292929] dark:bg-[#151515] dark:text-[#999999] space-y-2">
                 <p>This layer is locked. Click Unlock above to move, resize, or recolor.</p>
                 {primaryNode.isBackground && (
                   <button
                     type="button"
                     onClick={onOpenBackgroundTab}
-                    className="underline text-[#F5F5F5] cursor-pointer"
+                    className="underline text-[#111111] dark:text-[#F5F5F5] cursor-pointer"
                   >
                     Edit background colors &amp; gradients
                   </button>
@@ -1444,10 +1516,10 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
               <>
                 {!primaryNode.isBackground && renderAlignControls([primaryNode.id])}
 
-                <div className="pt-2.5 border-t border-[#292929] space-y-3">
+                <div className="pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929] space-y-3">
                   {/* Fill */}
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-medium text-[#999999]">Fill Color</span>
+                    <span className="text-[11px] font-medium text-[#52525B] dark:text-[#999999]">Fill Color</span>
                     <div className="flex items-center gap-1.5">
                       <input
                         type="color"
@@ -1456,15 +1528,15 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         onChange={(e) =>
                           onSetNodeFill(primaryNode.id, e.target.value.toUpperCase(), true)
                         }
-                        className="w-7 h-7 rounded border border-[#292929] cursor-pointer bg-[#0D0D0D] p-0"
+                        className="w-7 h-7 rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D] cursor-pointer p-0"
                       />
                       <button
                         type="button"
                         onClick={() => onSetNodeFill(primaryNode.id, 'none')}
                         className={`px-2 h-7 rounded border text-[11px] cursor-pointer ${
                           primaryFillRaw === 'none'
-                            ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5]'
-                            : 'bg-[#151515] text-[#999999] border-[#292929] hover:text-[#F5F5F5]'
+                            ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5]'
+                            : 'bg-[#FAFAFA] text-[#52525B] border-[#E4E4E7] hover:text-[#111111] dark:bg-[#151515] dark:text-[#999999] dark:border-[#292929] dark:hover:text-[#F5F5F5]'
                         }`}
                       >
                         None
@@ -1474,7 +1546,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
 
                   {/* Stroke */}
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-medium text-[#999999]">Border / Stroke</span>
+                    <span className="text-[11px] font-medium text-[#52525B] dark:text-[#999999]">Border / Stroke</span>
                     <div className="flex items-center gap-1.5">
                       <input
                         type="color"
@@ -1486,7 +1558,7 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                             onSetNodeStrokeWidth(primaryNode.id, 2, true);
                           }
                         }}
-                        className="w-7 h-7 rounded border border-[#292929] cursor-pointer bg-[#0D0D0D] p-0"
+                        className="w-7 h-7 rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D] cursor-pointer p-0"
                       />
                       <button
                         type="button"
@@ -1496,8 +1568,8 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         }}
                         className={`px-2 h-7 rounded border text-[11px] cursor-pointer ${
                           !primaryStrokeRaw || primaryStrokeRaw === 'none'
-                            ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5]'
-                            : 'bg-[#151515] text-[#999999] border-[#292929] hover:text-[#F5F5F5]'
+                            ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5]'
+                            : 'bg-[#FAFAFA] text-[#52525B] border-[#E4E4E7] hover:text-[#111111] dark:bg-[#151515] dark:text-[#999999] dark:border-[#292929] dark:hover:text-[#F5F5F5]'
                         }`}
                       >
                         None
@@ -1506,9 +1578,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                   </div>
 
                   <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                    <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                       <span>Stroke Width</span>
-                      <span className="tabular-nums text-[#E5E5E5]">{primaryStrokeWidth}px</span>
+                      <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">{primaryStrokeWidth}px</span>
                     </div>
                     <input
                       type="range"
@@ -1519,16 +1591,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       onChange={(e) =>
                         onSetNodeStrokeWidth(primaryNode.id, Number(e.target.value), true)
                       }
-                      className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                      className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                     />
                   </div>
 
                   {/* Corner Radius for Rectangles */}
                   {primaryNode.tag === 'rect' && !primaryNode.isBackground && (
                     <div className="space-y-1">
-                      <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                      <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                         <span>Corner Radius</span>
-                        <span className="tabular-nums text-[#E5E5E5]">{primaryCornerRadius}px</span>
+                        <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">{primaryCornerRadius}px</span>
                       </div>
                       <input
                         type="range"
@@ -1539,16 +1611,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                         onChange={(e) =>
                           onSetNodeCornerRadius(primaryNode.id, Number(e.target.value), true)
                         }
-                        className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                        className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                       />
                     </div>
                   )}
 
                   {/* Opacity */}
                   <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[11px] text-[#999999]">
+                    <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                       <span>Opacity</span>
-                      <span className="tabular-nums text-[#E5E5E5]">
+                      <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">
                         {Math.round((Number.isFinite(primaryOpacity) ? primaryOpacity : 1) * 100)}%
                       </span>
                     </div>
@@ -1561,21 +1633,21 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                       onChange={(e) =>
                         onSetNodeOpacity(primaryNode.id, Number(e.target.value), true)
                       }
-                      className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                      className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
                     />
                   </div>
                 </div>
 
                 {/* Replace Shape / Icon Drawer */}
                 {!primaryNode.isBackground && (
-                  <div className="pt-2.5 border-t border-[#292929] space-y-2">
+                  <div className="pt-2.5 border-t border-[#E4E4E7] dark:border-[#292929] space-y-2">
                     <button
                       type="button"
                       onClick={() => setReplaceDrawerOpen((o) => !o)}
-                      className="w-full h-8 px-2.5 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] flex items-center justify-between text-xs text-[#E5E5E5] cursor-pointer"
+                      className="w-full h-8 px-2.5 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-xs text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] flex items-center justify-between dark:text-[#E5E5E5] cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-1.5">
-                        <RefreshCw className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <RefreshCw className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Replace Shape / Icon</span>
                       </span>
                       {replaceDrawerOpen ? (
@@ -1598,18 +1670,18 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                                 onReplaceNodeWithPreset(primaryNode.id, replacement);
                                 setReplaceDrawerOpen(false);
                               }}
-                              className="p-2 rounded border border-[#292929] bg-[#151515] hover:bg-[#252525] hover:border-[#C0C0C0] flex flex-col items-center gap-1 cursor-pointer"
+                              className="p-2 rounded border border-[#E4E4E7] bg-[#FAFAFA] hover:bg-[#F4F4F5] hover:border-[#A1A1AA] dark:border-[#292929] dark:bg-[#151515] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0] flex flex-col items-center gap-1 cursor-pointer"
                             >
                               <svg
                                 viewBox={preset.viewBox}
-                                className="w-6 h-6 text-[#E5E5E5]"
+                                className="w-6 h-6 text-[#18181B] dark:text-[#E5E5E5]"
                                 aria-hidden="true"
                               >
                                 {preset.previewPaths.map((item, idx) =>
                                   React.createElement(item.tag, { key: idx, ...item.attrs })
                                 )}
                               </svg>
-                              <span className="text-[10px] text-[#C0C0C0] truncate max-w-full">
+                              <span className="text-[10px] text-[#3F3F46] dark:text-[#C0C0C0] truncate max-w-full">
                                 {preset.name}
                               </span>
                             </button>
@@ -1630,9 +1702,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
       {selectedIds.length === 0 && (
         <div className="space-y-5">
           <div>
-            <h2 className="text-sm font-medium text-[#F5F5F5]">Document Properties</h2>
-            <p className="text-xs text-[#999999] mt-0.5">
-              Click any element on the canvas to inspect and customize it, or double-click text to edit in place.
+            <h2 className="text-sm font-medium text-[#111111] dark:text-[#F5F5F5]">Document Properties</h2>
+            <p className="text-xs text-[#52525B] dark:text-[#999999] mt-0.5">
+              Click any element on the canvas to inspect and customize it, or click text to edit directly on the design.
             </p>
           </div>
 
@@ -1640,9 +1712,9 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
             <button
               type="button"
               onClick={onPasteNodes}
-              className="w-full h-9 px-3 rounded-md border border-[#C0C0C0]/60 bg-[#151515] hover:bg-[#252525] text-xs font-medium text-[#F5F5F5] inline-flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              className="w-full h-9 px-3 rounded-md border border-[#A1A1AA] bg-[#FAFAFA] hover:bg-[#F4F4F5] text-xs font-medium text-[#111111] dark:border-[#C0C0C0]/60 dark:bg-[#151515] dark:hover:bg-[#252525] dark:text-[#F5F5F5] inline-flex items-center justify-center gap-2 cursor-pointer transition-colors"
             >
-              <ClipboardPaste className="w-3.5 h-3.5 text-[#E5E5E5]" />
+              <ClipboardPaste className="w-3.5 h-3.5 text-[#18181B] dark:text-[#E5E5E5]" />
               <span>
                 Paste {clipboardCount} Copied {clipboardCount === 1 ? 'Element' : 'Elements'} (Ctrl+V)
               </span>
@@ -1650,16 +1722,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           )}
 
           {hiddenNodes.length > 0 && (
-            <div className="p-3.5 rounded-lg border border-[#292929] bg-[#151515] space-y-2.5">
+            <div className="p-3.5 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#151515] space-y-2.5">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-[#F5F5F5]">
+                <span className="text-xs font-medium text-[#111111] dark:text-[#F5F5F5]">
                   Hidden Elements ({hiddenNodes.length})
                 </span>
                 {hiddenNodes.length > 1 && (
                   <button
                     type="button"
                     onClick={() => hiddenNodes.forEach((n) => onToggleVisibility(n.id))}
-                    className="text-[11px] underline text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer"
+                    className="text-[11px] underline text-[#3F3F46] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer"
                   >
                     Show All
                   </button>
@@ -1669,16 +1741,16 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 {hiddenNodes.map((n) => (
                   <div
                     key={n.id}
-                    className="flex items-center justify-between gap-2 px-2 py-1.5 rounded border border-[#292929] bg-[#0D0D0D]"
+                    className="flex items-center justify-between gap-2 px-2 py-1.5 rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D]"
                   >
-                    <span className="text-[11px] text-[#C0C0C0] truncate">{n.label}</span>
+                    <span className="text-[11px] text-[#3F3F46] dark:text-[#C0C0C0] truncate">{n.label}</span>
                     <button
                       type="button"
                       onClick={() => {
                         onToggleVisibility(n.id);
                         onSelectNodes([n.id]);
                       }}
-                      className="text-[11px] text-[#E5E5E5] hover:underline inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                      className="text-[11px] text-[#111111] dark:text-[#E5E5E5] hover:underline inline-flex items-center gap-1 shrink-0 cursor-pointer"
                     >
                       <Eye className="w-3 h-3" />
                       <span>Show</span>
@@ -1690,20 +1762,20 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
           )}
 
           {/* Quick Background Switcher */}
-          <div className="p-3.5 rounded-lg border border-[#292929] bg-[#151515] space-y-3">
+          <div className="p-3.5 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#151515] space-y-3">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-[#F5F5F5]">Canvas Background</span>
+              <span className="text-xs font-medium text-[#111111] dark:text-[#F5F5F5]">Canvas Background</span>
               <button
                 type="button"
                 onClick={onOpenBackgroundTab}
-                className="text-[11px] underline text-[#C0C0C0] hover:text-[#F5F5F5] cursor-pointer"
+                className="text-[11px] underline text-[#3F3F46] hover:text-[#111111] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] cursor-pointer"
               >
                 Full Studio
               </button>
             </div>
 
             <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] text-[#999999]">
+              <span className="text-[11px] text-[#52525B] dark:text-[#999999]">
                 {bgConfig.mode === 'solid'
                   ? 'Solid Fill'
                   : bgConfig.mode === 'linear'
@@ -1720,14 +1792,14 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                     true
                   )
                 }
-                className="w-8 h-8 rounded border border-[#292929] bg-[#0D0D0D] cursor-pointer p-0"
+                className="w-8 h-8 rounded border border-[#E4E4E7] bg-white dark:border-[#292929] dark:bg-[#0D0D0D] cursor-pointer p-0"
               />
             </div>
 
             <div className="space-y-1">
-              <div className="flex items-center justify-between text-[11px] text-[#999999]">
+              <div className="flex items-center justify-between text-[11px] text-[#52525B] dark:text-[#999999]">
                 <span>Background Opacity</span>
-                <span className="tabular-nums text-[#E5E5E5]">
+                <span className="tabular-nums text-[#111111] dark:text-[#E5E5E5]">
                   {Math.round(bgConfig.opacity * 100)}%
                 </span>
               </div>
@@ -1740,48 +1812,48 @@ export const RightInspector: React.FC<RightInspectorProps> = ({
                 onChange={(e) =>
                   onApplyBackground({ ...bgConfig, opacity: Number(e.target.value) / 100 }, true)
                 }
-                className="w-full h-4 accent-[#E5E5E5] cursor-pointer"
+                className="w-full h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
               />
             </div>
 
-            <label className="pt-2 border-t border-[#292929] flex items-center justify-between gap-2 cursor-pointer">
-              <span className="text-[11px] text-[#C0C0C0]">Transparent SVG Background</span>
+            <label className="pt-2 border-t border-[#E4E4E7] dark:border-[#292929] flex items-center justify-between gap-2 cursor-pointer">
+              <span className="text-[11px] text-[#3F3F46] dark:text-[#C0C0C0]">Transparent SVG Background</span>
               <input
                 type="checkbox"
                 checked={transparentBackground}
                 onChange={(e) => onSetTransparentBackground(e.target.checked)}
-                className="w-4 h-4 accent-[#E5E5E5] cursor-pointer"
+                className="w-4 h-4 accent-[#18181B] dark:accent-[#E5E5E5] cursor-pointer"
               />
             </label>
           </div>
 
           {/* Scene Specs */}
-          <dl className="p-3.5 rounded-lg border border-[#292929] bg-[#151515] space-y-2 text-xs">
+          <dl className="p-3.5 rounded-lg border border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#151515] space-y-2 text-xs">
             <div className="flex items-center justify-between">
-              <dt className="text-[#999999]">ViewBox</dt>
-              <dd className="font-mono text-[11px] text-[#F5F5F5]">{scene.viewBox}</dd>
+              <dt className="text-[#52525B] dark:text-[#999999]">ViewBox</dt>
+              <dd className="font-mono text-[11px] text-[#111111] dark:text-[#F5F5F5]">{scene.viewBox}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-[#999999]">Dimensions</dt>
-              <dd className="tabular-nums text-[#F5F5F5]">
+              <dt className="text-[#52525B] dark:text-[#999999]">Dimensions</dt>
+              <dd className="tabular-nums text-[#111111] dark:text-[#F5F5F5]">
                 {scene.vbW} × {scene.vbH}
               </dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-[#999999]">Text Elements</dt>
-              <dd className="tabular-nums text-[#F5F5F5]">{stats.textCount}</dd>
+              <dt className="text-[#52525B] dark:text-[#999999]">Text Elements</dt>
+              <dd className="tabular-nums text-[#111111] dark:text-[#F5F5F5]">{stats.textCount}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-[#999999]">Shapes &amp; Paths</dt>
-              <dd className="tabular-nums text-[#F5F5F5]">{stats.shapeCount}</dd>
+              <dt className="text-[#52525B] dark:text-[#999999]">Shapes &amp; Paths</dt>
+              <dd className="tabular-nums text-[#111111] dark:text-[#F5F5F5]">{stats.shapeCount}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-[#999999]">Groups</dt>
-              <dd className="tabular-nums text-[#F5F5F5]">{stats.groupCount}</dd>
+              <dt className="text-[#52525B] dark:text-[#999999]">Groups</dt>
+              <dd className="tabular-nums text-[#111111] dark:text-[#F5F5F5]">{stats.groupCount}</dd>
             </div>
             <div className="flex items-center justify-between">
-              <dt className="text-[#999999]">Embedded Images</dt>
-              <dd className="tabular-nums text-[#F5F5F5]">{stats.imageCount}</dd>
+              <dt className="text-[#52525B] dark:text-[#999999]">Embedded Images</dt>
+              <dd className="tabular-nums text-[#111111] dark:text-[#F5F5F5]">{stats.imageCount}</dd>
             </div>
           </dl>
         </div>

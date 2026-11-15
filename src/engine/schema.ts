@@ -1,3 +1,4 @@
+import { SceneFontScanSummary } from './fonts';
 import { SvgSceneDocument } from './svgScene';
 
 export type TextAnchor = 'start' | 'middle' | 'end';
@@ -11,6 +12,7 @@ export interface UploadedSvgSourceInfo {
   groupCount: number;
   imageCount: number;
   warnings: string[];
+  fontSummary?: SceneFontScanSummary;
 }
 
 export interface LoadedTemplateV1 {

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 700" width="700" height="700" data-badge-series="botanical">
+  <defs>
+    <symbol id="botanicalLeaf" viewBox="0 0 60 60">
+      <path d="M30 5 C45 15 50 35 30 55 C10 35 15 15 30 5 Z" fill="#6F8F72" />
+      <path d="M30 10 L30 52" stroke="#FAF7F0" stroke-width="1.5" />
+    </symbol>
+    <path id="badgeCircleTop" d="M 150,350 A 200,200 0 1,1 550,350" />
+    <path id="badgeCircleBottom" d="M 170,380 A 185,185 0 0,0 530,380" />
+  </defs>
+
+  <rect x="0" y="0" width="700" height="700" fill="#FAF7F0" />
+
+  <g transform="translate(350, 350)" data-group-kind="seal">
+    <defs>
+      <pattern id="nestedDotPattern" width="18" height="18" patternUnits="userSpaceOnUse">
+        <circle cx="9" cy="9" r="2" fill="#8BA68D" fill-opacity="0.35" />
+      </pattern>
+      <mask id="nestedRingMask">
+        <circle cx="0" cy="0" r="230" fill="#FFFFFF" />
+        <circle cx="0" cy="0" r="145" fill="#000000" />
+      </mask>
+    </defs>
+
+    <circle cx="0" cy="0" r="230" fill="url(#nestedDotPattern)" mask="url(#nestedRingMask)" stroke="#3D5240" stroke-width="3" stroke-dasharray="6 4" />
+    <use href="#botanicalLeaf" x="-160" y="-30" width="60" height="60" />
+    <use href="#botanicalLeaf" x="100" y="-30" width="60" height="60" />
+  </g>
+
+  <text font-family="Cormorant Garamond" font-size="32" fill="#2A3A2C" letter-spacing="3">
+    <textPath href="#badgeCircleTop" startOffset="50%" text-anchor="middle">BOTANICAL CONSERVATORY</textPath>
+  </text>
+
+  <text font-family="Lora" font-size="22" fill="#4A604D">
+    <textPath href="#badgeCircleBottom" startOffset="50%" text-anchor="middle">
+      <tspan>EST.</tspan>
+      <tspan dx="8" font-weight="700">1924</tspan>
+    </textPath>
+  </text>
+</svg>

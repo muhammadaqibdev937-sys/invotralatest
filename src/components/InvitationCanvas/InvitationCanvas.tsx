@@ -37,13 +37,20 @@ import {
   canReorderNode,
   collectAllNodes,
   findNodeWithAncestors,
+  getNodeTspans,
   getTextNodeProperties,
+  resolveTransformPivotPatch,
   SvgSceneDocument,
   SvgSceneNode,
   SvgTransformState,
   TextEditPatch,
 } from '../../engine/svgScene';
-import { SvgSceneContent } from '../Canvas/SvgSceneRenderer';
+import {
+  getCssFontFallback,
+  SvgSceneContent,
+  svgAttrsToReactProps,
+} from '../Canvas/SvgSceneRenderer';
+import { LiveTextControl } from '../Editor/LiveTextControl';
 
 export interface FontPreviewOverride {
   nodeId: string;
@@ -75,7 +82,9 @@ interface InvitationCanvasProps {
     coalesce?: boolean
   ) => void;
   onUpdateTextNode?: (nodeId: string, patch: TextEditPatch, coalesce?: boolean) => void;
+  onCommitTextBoundary?: () => void;
   onDoubleClickTextNode?: (nodeId: string) => void;
+  onDirectTextEdit?: (nodeId: string) => void;
   onCopyNodes?: (ids: string[]) => void;
   onPasteNodes?: () => void;
   onDuplicateNodes?: (ids: string[]) => void;
@@ -86,6 +95,9 @@ interface InvitationCanvasProps {
   onFlipNode?: (nodeId: string, axis: 'x' | 'y') => void;
   onCenterNode?: (nodeId: string) => void;
   onRegisterBoxReader?: (reader: (ids: string[]) => Record<string, RectBox>) => void | (() => void);
+  onRegisterPivotReader?: (
+    reader: (id: string) => { x: number; y: number } | null
+  ) => void | (() => void);
 }
 
 const ZOOM_PRESETS = [25, 50, 75, 100, 125, 150, 200] as const;
@@ -112,6 +124,26 @@ function domRectToCanvasBox(
   );
 }
 
+function boxesEqual(a: Record<string, RectBox>, b: Record<string, RectBox>): boolean {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    const ba = a[k];
+    const bb = b[k];
+    if (!bb) return false;
+    if (
+      Math.abs(ba.left - bb.left) > 0.05 ||
+      Math.abs(ba.top - bb.top) > 0.05 ||
+      Math.abs(ba.width - bb.width) > 0.05 ||
+      Math.abs(ba.height - bb.height) > 0.05
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
   designId,
   scene,
@@ -130,7 +162,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
   onUpdateNodeTransform,
   onBatchUpdateTransforms,
   onUpdateTextNode,
+  onCommitTextBoundary,
   onDoubleClickTextNode,
+  onDirectTextEdit,
   onCopyNodes,
   onPasteNodes,
   onDuplicateNodes,
@@ -141,9 +175,11 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
   onFlipNode,
   onCenterNode,
   onRegisterBoxReader,
+  onRegisterPivotReader,
 }) => {
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const directEditorRef = useRef<HTMLDivElement>(null);
 
   const [zoomMode, setZoomMode] = useState<'fit' | 'manual'>('fit');
   const [zoomPercent, setZoomPercent] = useState<number>(100);
@@ -155,11 +191,36 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
   const [selectionBoxes, setSelectionBoxes] = useState<Record<string, RectBox>>({});
   const [activeRotationReadout, setActiveRotationReadout] = useState<number | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const [textPathCaret, setTextPathCaret] = useState<{
+    nodeId: string;
+    start: number;
+    end: number;
+  } | null>(null);
+  const [textPathCaretCoords, setTextPathCaretCoords] = useState<{
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+    rot: number;
+    cx: number;
+    cy: number;
+    color: string;
+  } | null>(null);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
     nodeId: string | null;
   } | null>(null);
+
+  const sceneNodesRef = useRef(scene.nodes);
+  sceneNodesRef.current = scene.nodes;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
+  const editingTextIdRef = useRef(editingTextId);
+  editingTextIdRef.current = editingTextId;
+  const lastEditBoxRef = useRef<{ nodeId: string; box: RectBox } | null>(null);
+  const panOffsetRef = useRef(panOffset);
+  panOffsetRef.current = panOffset;
 
   const pinchDistRef = useRef<number | null>(null);
 
@@ -174,6 +235,10 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
     | {
         kind: 'move';
         nodeId: string;
+        rawNodeId: string;
+        pointerButton: number;
+        shiftKey: boolean;
+        wasAlreadySelected: boolean;
         startClientX: number;
         startClientY: number;
         origTx: number;
@@ -229,10 +294,32 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
   }, [designId]);
 
   useEffect(() => {
-    if (isPreviewMode || (editingTextId && !selectedIds.includes(editingTextId))) {
+    if (editingTextId && (isPreviewMode || !selectedIds.includes(editingTextId))) {
       setEditingTextId(null);
+      onCommitTextBoundary?.();
     }
-  }, [isPreviewMode, editingTextId, selectedIds]);
+  }, [isPreviewMode, editingTextId, selectedIds, onCommitTextBoundary]);
+
+  useEffect(() => {
+    if (!editingTextId) return;
+    const handleOutsidePointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && directEditorRef.current?.contains(target)) {
+        return;
+      }
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && directEditorRef.current?.contains(active)) {
+        active.blur();
+      } else {
+        onCommitTextBoundary?.();
+      }
+      setEditingTextId(null);
+    };
+    window.addEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', handleOutsidePointerDown, { capture: true });
+    };
+  }, [editingTextId, onCommitTextBoundary]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -286,6 +373,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
     const container = viewportRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
     const padX = window.innerWidth < 768 ? 28 : 80;
     const padY = window.innerWidth < 768 ? 48 : 96;
     const availW = Math.max(180, rect.width - padX);
@@ -309,6 +397,15 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
   const displayWidth = Math.max(40, Math.round(vbW * effectiveScale));
   const displayHeight = Math.max(40, Math.round(vbH * effectiveScale));
 
+  const findSceneDomElement = useCallback((svgEl: SVGSVGElement, id: string): Element | null => {
+    const escaped = id.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    try {
+      return svgEl.querySelector(`[data-scene-id="${escaped}"]`);
+    } catch {
+      return null;
+    }
+  }, []);
+
   const readNodeBoxes = useCallback(
     (ids: string[]): Record<string, RectBox> => {
       const svgEl = svgRef.current;
@@ -317,7 +414,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       if (svgRect.width <= 0 || svgRect.height <= 0) return {};
       const next: Record<string, RectBox> = {};
       for (const id of ids) {
-        const targetEl = svgEl.querySelector(`[data-scene-id="${id}"]`);
+        const targetEl = findSceneDomElement(svgEl, id);
         if (!targetEl) continue;
         const box = domRectToCanvasBox(
           targetEl.getBoundingClientRect(),
@@ -331,7 +428,90 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       }
       return next;
     },
-    [vbX, vbY, vbW, vbH]
+    [findSceneDomElement, vbX, vbY, vbW, vbH]
+  );
+
+  const readNodeLocalCenter = useCallback(
+    (id: string): { x: number; y: number } | null => {
+      const svgEl = svgRef.current;
+      if (!svgEl) return null;
+      const svgRect = svgEl.getBoundingClientRect();
+      if (svgRect.width <= 0 || svgRect.height <= 0) return null;
+      const targetEl = findSceneDomElement(svgEl, id);
+      if (!targetEl) return null;
+
+      const info = findNodeWithAncestors(sceneNodesRef.current, id);
+      const node = info?.node;
+
+      if (typeof (targetEl as SVGGraphicsElement).getBBox === 'function') {
+        try {
+          const bbox = (targetEl as SVGGraphicsElement).getBBox();
+          if (
+            Number.isFinite(bbox.x) &&
+            Number.isFinite(bbox.y) &&
+            Number.isFinite(bbox.width) &&
+            Number.isFinite(bbox.height) &&
+            (bbox.width > 0 || bbox.height > 0)
+          ) {
+            let cx = bbox.x + bbox.width / 2;
+            let cy = bbox.y + bbox.height / 2;
+            if (node?.transform.baseTransform && typeof DOMMatrix !== 'undefined') {
+              try {
+                const m = new DOMMatrix(node.transform.baseTransform);
+                const pts = [
+                  m.transformPoint(new DOMPoint(bbox.x, bbox.y)),
+                  m.transformPoint(new DOMPoint(bbox.x + bbox.width, bbox.y)),
+                  m.transformPoint(new DOMPoint(bbox.x, bbox.y + bbox.height)),
+                  m.transformPoint(new DOMPoint(bbox.x + bbox.width, bbox.y + bbox.height)),
+                ];
+                const xs = pts.map((p) => p.x);
+                const ys = pts.map((p) => p.y);
+                cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+                cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+              } catch {
+                // Keep raw getBBox center if baseTransform isn't a valid CSS/SVG matrix
+              }
+            }
+            return { x: cx, y: cy };
+          }
+        } catch {
+          // Fall through to CTM / rect fallback
+        }
+      }
+
+      const elRect = targetEl.getBoundingClientRect();
+      if (elRect.width > 0 || elRect.height > 0) {
+        const clientCenterX = elRect.left + elRect.width / 2;
+        const clientCenterY = elRect.top + elRect.height / 2;
+        const parentEl = targetEl.parentElement as SVGGraphicsElement | null;
+        if (parentEl && typeof parentEl.getScreenCTM === 'function') {
+          try {
+            const parentCtm = parentEl.getScreenCTM();
+            if (parentCtm) {
+              const pt = new DOMPoint(clientCenterX, clientCenterY).matrixTransform(
+                parentCtm.inverse()
+              );
+              return {
+                x: pt.x - (node?.transform.tx ?? 0),
+                y: pt.y - (node?.transform.ty ?? 0),
+              };
+            }
+          } catch {
+            // Fall through to root box conversion
+          }
+        }
+        const box = domRectToCanvasBox(elRect, svgRect, vbX, vbY, vbW, vbH);
+        if (box) {
+          return {
+            x: box.centerX - (node?.transform.tx ?? 0),
+            y: box.centerY - (node?.transform.ty ?? 0),
+          };
+        }
+      }
+
+      return null;
+    },
+    [findSceneDomElement, vbX, vbY, vbW, vbH]
   );
 
   useEffect(() => {
@@ -339,17 +519,86 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
     return onRegisterBoxReader(readNodeBoxes);
   }, [onRegisterBoxReader, readNodeBoxes]);
 
+  useEffect(() => {
+    if (!onRegisterPivotReader) return;
+    return onRegisterPivotReader(readNodeLocalCenter);
+  }, [onRegisterPivotReader, readNodeLocalCenter]);
+
   const measureBoxes = useCallback(() => {
-    if (isPreviewMode || selectedIds.length === 0) {
-      setSelectionBoxes({});
+    if (isPreviewMode || (selectedIds.length === 0 && !editingTextId)) {
+      setSelectionBoxes((prev) => (Object.keys(prev).length === 0 ? prev : {}));
       return;
     }
-    setSelectionBoxes(readNodeBoxes(selectedIds));
-  }, [isPreviewMode, selectedIds, readNodeBoxes]);
+    const idsToMeasure =
+      editingTextId && !selectedIds.includes(editingTextId)
+        ? [...selectedIds, editingTextId]
+        : selectedIds;
+    const next = readNodeBoxes(idsToMeasure);
+    setSelectionBoxes((prev) => (boxesEqual(prev, next) ? prev : next));
+  }, [isPreviewMode, selectedIds, editingTextId, readNodeBoxes]);
 
   useLayoutEffect(() => {
     measureBoxes();
   }, [measureBoxes, scene, fitScale, zoomMode, zoomPercent, panOffset, previewOverride]);
+
+  useLayoutEffect(() => {
+    if (isPreviewMode || !editingTextId) {
+      setTextPathCaretCoords(null);
+      return;
+    }
+    const editInfo = findNodeWithAncestors(scene.nodes, editingTextId);
+    if (!editInfo || !editInfo.node.textPath) {
+      setTextPathCaretCoords(null);
+      return;
+    }
+    const svgEl = svgRef.current;
+    if (!svgEl) {
+      setTextPathCaretCoords(null);
+      return;
+    }
+    const textEl = findSceneDomElement(svgEl, editingTextId) as SVGTextContentElement | null;
+    if (!textEl || typeof textEl.getStartPositionOfChar !== 'function') {
+      setTextPathCaretCoords(null);
+      return;
+    }
+    const props = getTextNodeProperties(editInfo.node, scene.cssRules, editInfo.ancestors);
+    const caretIdx =
+      textPathCaret?.nodeId === editingTextId
+        ? Math.max(0, textPathCaret.start)
+        : props.fullText.length;
+    try {
+      const totalChars = textEl.getNumberOfChars();
+      if (totalChars <= 0) {
+        setTextPathCaretCoords(null);
+        return;
+      }
+      const clampedIdx = Math.min(caretIdx, totalChars);
+      const isAtEnd = clampedIdx >= totalChars;
+      const charIdx = isAtEnd ? totalChars - 1 : clampedIdx;
+      const pt = isAtEnd
+        ? textEl.getEndPositionOfChar(charIdx)
+        : textEl.getStartPositionOfChar(charIdx);
+      const rot =
+        typeof textEl.getRotationOfChar === 'function'
+          ? textEl.getRotationOfChar(charIdx)
+          : 0;
+      const h = Math.max(12, props.fontSize);
+      const caretColor =
+        props.color && props.color !== 'none' ? props.color : '#18181B';
+      setTextPathCaretCoords({
+        x1: pt.x,
+        y1: pt.y - h * 0.85,
+        x2: pt.x,
+        y2: pt.y + h * 0.2,
+        rot: Number.isFinite(rot) ? rot : 0,
+        cx: pt.x,
+        cy: pt.y,
+        color: caretColor,
+      });
+    } catch {
+      setTextPathCaretCoords(null);
+    }
+  }, [isPreviewMode, editingTextId, textPathCaret, scene, findSceneDomElement]);
 
   const collectSnapTargets = useCallback(
     (excludeIds: Set<string>): SnapTarget[] => {
@@ -432,18 +681,18 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
     }
   };
 
-  const resolveClickableNodeId = (clickedNode: SvgSceneNode): string => {
+  const resolveClickableNodeId = useCallback((clickedNode: SvgSceneNode): string => {
     // If clicked element is inside a user-created group (`group_*`), select the group unless already inside it
-    const info = findNodeWithAncestors(scene.nodes, clickedNode.id);
+    const info = findNodeWithAncestors(sceneNodesRef.current, clickedNode.id);
     if (!info) return clickedNode.id;
     const userGroupAncestor = info.ancestors.find(
       (anc) => anc.id.startsWith('group_') && !anc.locked
     );
-    if (userGroupAncestor && !selectedIds.includes(clickedNode.id)) {
+    if (userGroupAncestor && !selectedIdsRef.current.includes(clickedNode.id)) {
       return userGroupAncestor.id;
     }
     return clickedNode.id;
-  };
+  }, []);
 
   const handleNodePointerDown = useCallback(
     (e: React.PointerEvent<SVGElement>, rawNode: SvgSceneNode) => {
@@ -463,19 +712,32 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       e.stopPropagation();
 
       const targetId = resolveClickableNodeId(rawNode);
-      const targetInfo = findNodeWithAncestors(scene.nodes, targetId);
+      const currentNodes = sceneNodesRef.current;
+      const currentSelected = selectedIdsRef.current;
+      const targetInfo = findNodeWithAncestors(currentNodes, targetId);
       const targetNode = targetInfo?.node ?? rawNode;
 
+      if (
+        editingTextIdRef.current &&
+        editingTextIdRef.current !== targetId &&
+        editingTextIdRef.current !== rawNode.id
+      ) {
+        setEditingTextId(null);
+        onCommitTextBoundary?.();
+      }
+
       if (e.shiftKey) {
-        const next = selectedIds.includes(targetId)
-          ? selectedIds.filter((id) => id !== targetId)
-          : [...selectedIds, targetId];
+        const next = currentSelected.includes(targetId)
+          ? currentSelected.filter((id) => id !== targetId)
+          : [...currentSelected, targetId];
         onSelectNodes(next);
         return;
       }
 
+      const wasAlreadySelected =
+        currentSelected.includes(targetId) || currentSelected.includes(rawNode.id);
       const alreadyInMultiSelection =
-        selectedIds.length > 1 && selectedIds.includes(targetId);
+        currentSelected.length > 1 && currentSelected.includes(targetId);
       if (!alreadyInMultiSelection) {
         onSelectNodes([targetId]);
       }
@@ -484,10 +746,10 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
         return;
       }
 
-      const activeIds = alreadyInMultiSelection ? selectedIds : [targetId];
+      const activeIds = alreadyInMultiSelection ? currentSelected : [targetId];
       const peers: Array<{ nodeId: string; origTx: number; origTy: number }> = [];
       for (const id of activeIds) {
-        const n = findNodeWithAncestors(scene.nodes, id)?.node;
+        const n = findNodeWithAncestors(currentNodes, id)?.node;
         if (n && !n.locked) {
           peers.push({ nodeId: id, origTx: n.transform.tx, origTy: n.transform.ty });
         }
@@ -512,6 +774,10 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       interactionRef.current = {
         kind: 'move',
         nodeId: targetId,
+        rawNodeId: rawNode.id,
+        pointerButton: e.button,
+        shiftKey: e.shiftKey,
+        wasAlreadySelected,
         startClientX: e.clientX,
         startClientY: e.clientY,
         origTx: targetNode.transform.tx,
@@ -523,7 +789,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       };
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isPreviewMode, effectiveToolMode, selectedIds, scene.nodes, vbX, vbY, vbW, vbH, collectSnapTargets, onSelectNodes, onSelectBackground, panOffset]
+    [isPreviewMode, effectiveToolMode, vbX, vbY, vbW, vbH, collectSnapTargets, onSelectNodes, onSelectBackground, onCommitTextBoundary, resolveClickableNodeId]
   );
 
   const handleNodeDoubleClick = useCallback(
@@ -556,13 +822,12 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
         return;
       }
       const targetId = resolveClickableNodeId(rawNode);
-      if (!selectedIds.includes(targetId)) {
+      if (!selectedIdsRef.current.includes(targetId)) {
         onSelectNodes([targetId]);
       }
       setContextMenu({ x: e.clientX, y: e.clientY, nodeId: targetId });
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [isPreviewMode, hasClipboard, selectedIds, scene.nodes, onSelectNodes]
+    [isPreviewMode, hasClipboard, onSelectNodes, resolveClickableNodeId]
   );
 
   const handleResizePointerDown = (e: React.PointerEvent<SVGRectElement>, handle: ResizeHandleId) => {
@@ -574,10 +839,17 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
 
     const box = selectionBoxes[primaryId];
     const xform = node.transform;
-    const pivotX = xform.pivotX ?? box.centerX - xform.tx;
-    const pivotY = xform.pivotY ?? box.centerY - xform.ty;
-    const centerX = pivotX + xform.tx;
-    const centerY = pivotY + xform.ty;
+    const localCenter = readNodeLocalCenter(node.id) ?? {
+      x: box.centerX - xform.tx,
+      y: box.centerY - xform.ty,
+    };
+    const pivotPatch = resolveTransformPivotPatch(node, localCenter);
+    const pivotX = pivotPatch.pivotX ?? xform.pivotX ?? localCenter.x;
+    const pivotY = pivotPatch.pivotY ?? xform.pivotY ?? localCenter.y;
+    const resolvedTx = pivotPatch.tx ?? xform.tx;
+    const resolvedTy = pivotPatch.ty ?? xform.ty;
+    const centerX = box.centerX;
+    const centerY = box.centerY;
 
     svgRef.current?.setPointerCapture?.(e.pointerId);
     interactionRef.current = {
@@ -586,7 +858,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       nodeId: node.id,
       startClientX: e.clientX,
       startClientY: e.clientY,
-      origTransform: { ...xform },
+      origTransform: { ...xform, tx: resolvedTx, ty: resolvedTy, pivotX, pivotY },
       pivotX,
       pivotY,
       centerX,
@@ -608,10 +880,15 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
 
     const box = selectionBoxes[primaryId];
     const xform = node.transform;
-    const pivotX = xform.pivotX ?? box.centerX - xform.tx;
-    const pivotY = xform.pivotY ?? box.centerY - xform.ty;
-    const centerX = pivotX + xform.tx;
-    const centerY = pivotY + xform.ty;
+    const localCenter = readNodeLocalCenter(node.id) ?? {
+      x: box.centerX - xform.tx,
+      y: box.centerY - xform.ty,
+    };
+    const pivotPatch = resolveTransformPivotPatch(node, localCenter);
+    const pivotX = pivotPatch.pivotX ?? xform.pivotX ?? localCenter.x;
+    const pivotY = pivotPatch.pivotY ?? xform.pivotY ?? localCenter.y;
+    const centerX = box.centerX;
+    const centerY = box.centerY;
     const startAngleDeg = (Math.atan2(pt.y - centerY, pt.x - centerX) * 180) / Math.PI;
 
     svgRef.current?.setPointerCapture?.(e.pointerId);
@@ -651,11 +928,14 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
     const scaleY = vbH / rect.height;
 
     if (act.kind === 'move') {
-      if (
-        !act.moved &&
-        (Math.abs(e.clientX - act.startClientX) > 2 || Math.abs(e.clientY - act.startClientY) > 2)
-      ) {
+      if (!act.moved) {
+        if (Math.abs(e.clientX - act.startClientX) <= 3 && Math.abs(e.clientY - act.startClientY) <= 3) {
+          return;
+        }
         act.moved = true;
+        if (editingTextId) {
+          setEditingTextId(null);
+        }
       }
 
       const dx = (e.clientX - act.startClientX) * scaleX;
@@ -792,8 +1072,33 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
 
   const handlePointerUpGlobal = () => {
     const act = interactionRef.current;
-    if (act && act.kind === 'move' && !act.moved && act.peers.length > 1) {
-      onSelectNodes([act.nodeId]);
+    if (act && act.kind === 'move' && !act.moved) {
+      if (act.peers.length > 1) {
+        onSelectNodes([act.nodeId]);
+      }
+      if (
+        act.pointerButton === 0 &&
+        !act.shiftKey &&
+        !isPreviewMode &&
+        effectiveToolMode === 'select' &&
+        onUpdateTextNode
+      ) {
+        const clickedTarget = findNodeWithAncestors(scene.nodes, act.nodeId)?.node;
+        const clickedRaw = findNodeWithAncestors(scene.nodes, act.rawNodeId)?.node;
+        const textToEdit =
+          clickedTarget?.tag === 'text' && !clickedTarget.locked
+            ? clickedTarget
+            : clickedRaw?.tag === 'text' && !clickedRaw.locked && act.wasAlreadySelected
+            ? clickedRaw
+            : null;
+        if (textToEdit) {
+          if (textToEdit.id !== act.nodeId) {
+            onSelectNodes([textToEdit.id]);
+          }
+          setEditingTextId(textToEdit.id);
+          onDirectTextEdit?.(textToEdit.id);
+        }
+      }
     }
     interactionRef.current = null;
     setActiveGuides([]);
@@ -882,7 +1187,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
       onPointerMove={handlePointerMoveGlobal}
       onPointerUp={handlePointerUpGlobal}
       onPointerCancel={handlePointerUpGlobal}
-      className={`relative w-full h-full flex flex-col items-center justify-center overflow-auto ea-scrollbar select-none bg-[#090909] ${
+      className={`relative w-full h-full flex flex-col items-center justify-center overflow-auto ea-scrollbar select-none bg-[#ECECEE] dark:bg-[#090909] ${
         effectiveToolMode === 'pan' ? 'cursor-grab active:cursor-grabbing' : ''
       }`}
     >
@@ -900,13 +1205,21 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
               transparentBackground || scene.hasExplicitBackground ? undefined : scene.backgroundColor,
           }}
         >
-          <svg
-            ref={svgRef}
-            viewBox={viewBox}
-            width="100%"
-            height="100%"
-            preserveAspectRatio={scene.preserveAspectRatio || 'xMidYMid meet'}
-            className="block w-full h-full overflow-visible"
+          {(() => {
+            const rootSvgProps = svgAttrsToReactProps(scene.rootAttrs);
+            const mergedRootClass = [rootSvgProps.className, 'block w-full h-full overflow-visible']
+              .filter(Boolean)
+              .join(' ');
+            const { className: _ignoredCls, ...restRootProps } = rootSvgProps;
+            return (
+              <svg
+                {...restRootProps}
+                ref={svgRef}
+                viewBox={viewBox}
+                width="100%"
+                height="100%"
+                preserveAspectRatio={scene.preserveAspectRatio || 'xMidYMid meet'}
+                className={mergedRootClass}
             onPointerDown={(e) => {
               setContextMenu(null);
               if (e.button === 1 || (effectiveToolMode === 'pan' && e.button === 0)) {
@@ -930,6 +1243,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
               scene={scene}
               transparentBackground={transparentBackground}
               previewFontOverride={previewOverride}
+              editingNodeId={!isPreviewMode ? editingTextId : null}
               interactive={!isPreviewMode && effectiveToolMode === 'select'}
               onNodePointerDown={handleNodePointerDown}
               onNodeDoubleClick={handleNodeDoubleClick}
@@ -1112,16 +1426,38 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                 })}
               </g>
             )}
-          </svg>
+
+            {/* Direct Curve Caret for Active textPath Editing */}
+            {!isPreviewMode && editingTextId && textPathCaretCoords && (
+              <g
+                data-textpath-caret="true"
+                className="pointer-events-none"
+                transform={`rotate(${textPathCaretCoords.rot} ${textPathCaretCoords.cx} ${textPathCaretCoords.cy})`}
+              >
+                <line
+                  x1={textPathCaretCoords.x1}
+                  y1={textPathCaretCoords.y1}
+                  x2={textPathCaretCoords.x2}
+                  y2={textPathCaretCoords.y2}
+                  stroke={textPathCaretCoords.color}
+                  strokeWidth={2}
+                  vectorEffect="non-scaling-stroke"
+                  className="animate-pulse"
+                />
+              </g>
+            )}
+              </svg>
+            );
+          })()}
 
           {!isPreviewMode && activeRotationReadout !== null && (
-            <div className="pointer-events-none absolute top-2 right-2 px-2 py-1 rounded border border-[#292929] bg-[#151515]/95 text-[11px] font-mono tabular-nums text-[#F5F5F5] flex items-center gap-1">
-              <RotateCw className="w-3 h-3 text-[#C0C0C0]" />
+            <div className="pointer-events-none absolute top-2 right-2 px-2 py-1 rounded border border-[#E4E4E7] dark:border-[#292929] bg-white/95 dark:bg-[#151515]/95 text-[11px] font-mono tabular-nums text-[#111111] dark:text-[#F5F5F5] flex items-center gap-1">
+              <RotateCw className="w-3 h-3 text-[#3F3F46] dark:text-[#C0C0C0]" />
               <span>{activeRotationReadout}°</span>
             </div>
           )}
 
-          {/* Inline On-Canvas Text Editor */}
+          {/* Direct On-Design Inline Text Editor (Frameless for straight & curved textPath) */}
           {!isPreviewMode &&
             editingTextId &&
             onUpdateTextNode &&
@@ -1130,99 +1466,178 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
               if (!editInfo || editInfo.node.tag !== 'text' || editInfo.node.locked) return null;
               const editNode = editInfo.node;
               const editProps = getTextNodeProperties(editNode, scene.cssRules, editInfo.ancestors);
-              const box = selectionBoxes[editingTextId];
-              const pxLeft = box
-                ? Math.max(8, Math.min(displayWidth - 268, ((box.left - vbX) / vbW) * displayWidth))
-                : Math.max(8, (displayWidth - 260) / 2);
-              const pxTop = box
-                ? Math.max(
-                    8,
-                    Math.min(
-                      displayHeight - 130,
-                      ((box.bottom - vbY) / vbH) * displayHeight + 8
-                    )
-                  )
-                : Math.max(8, displayHeight / 2 - 40);
+              const isCurvedPath = Boolean(editNode.textPath);
+              const measuredBox = selectionBoxes[editingTextId];
+              if (measuredBox) {
+                lastEditBoxRef.current = { nodeId: editingTextId, box: measuredBox };
+              }
+              const box =
+                measuredBox ??
+                (lastEditBoxRef.current?.nodeId === editingTextId
+                  ? lastEditBoxRef.current.box
+                  : undefined);
+
+              const scaleX = displayWidth / vbW;
+              const scaleY = displayHeight / vbH;
+              const scaledFontSize = Math.max(11, editProps.fontSize * scaleY);
+              const lineHeightVal = editProps.lineHeight || 1.25;
+              const lines = (editProps.fullText || '').split('\n');
+              const lineCount = Math.max(1, lines.length);
+              const longestLen = Math.max(8, ...lines.map((l) => l.length));
+
+              let editorLeft = 8;
+              let editorTop = Math.max(8, displayHeight / 2 - 20);
+              let editorW = Math.max(120, Math.min(displayWidth - 16, 260));
+              let editorH = Math.max(32, Math.ceil(lineCount * scaledFontSize * lineHeightVal + 6));
+
+              if (box) {
+                const rawBoxLeft = ((box.left - vbX) / vbW) * displayWidth;
+                const rawBoxTop = ((box.top - vbY) / vbH) * displayHeight;
+                const rawBoxW = Math.max(40, ((box.right - box.left) / vbW) * displayWidth);
+                const rawBoxH = Math.max(
+                  scaledFontSize * lineHeightVal,
+                  ((box.bottom - box.top) / vbH) * displayHeight
+                );
+                const padX = isCurvedPath ? 4 : 10;
+                const estLineW = longestLen * scaledFontSize * 0.62 + padX * 2 + 24;
+                editorW = isCurvedPath
+                  ? Math.max(60, Math.min(displayWidth - 8, rawBoxW + padX * 2))
+                  : Math.max(rawBoxW + padX * 2, Math.min(displayWidth - 16, estLineW));
+                editorH = isCurvedPath
+                  ? Math.max(28, rawBoxH + 8)
+                  : Math.max(
+                      rawBoxH + 6,
+                      Math.ceil(lineCount * scaledFontSize * lineHeightVal + 6)
+                    );
+
+                editorLeft = rawBoxLeft - padX;
+                if (!isCurvedPath) {
+                  if (editProps.textAnchor === 'middle') {
+                    const centerPx = ((box.centerX - vbX) / vbW) * displayWidth;
+                    editorLeft = centerPx - editorW / 2;
+                  } else if (editProps.textAnchor === 'end') {
+                    const rightPx = ((box.right - vbX) / vbW) * displayWidth;
+                    editorLeft = rightPx - editorW + padX;
+                  }
+                }
+                editorLeft = Math.max(4, Math.min(displayWidth - editorW - 4, editorLeft));
+                editorTop = Math.max(4, Math.min(displayHeight - editorH - 4, rawBoxTop - 2));
+              }
 
               return (
                 <div
+                  ref={directEditorRef}
+                  data-direct-text-editor="true"
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => e.stopPropagation()}
                   style={{
-                    left: `${pxLeft}px`,
-                    top: `${pxTop}px`,
-                    boxShadow: 'var(--ea-shadow-float)',
+                    left: `${editorLeft}px`,
+                    top: `${editorTop}px`,
+                    width: `${editorW}px`,
                   }}
-                  className="absolute z-30 w-[260px] max-w-[calc(100vw-32px)] rounded-lg border border-[#C0C0C0] bg-[#151515] p-2.5 space-y-2 text-[#F5F5F5]"
+                  className="absolute z-30"
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[11px] font-medium text-[#C0C0C0] truncate inline-flex items-center gap-1.5">
-                      <Type className="w-3 h-3 shrink-0" />
-                      <span className="truncate">{editNode.label}</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setEditingTextId(null)}
-                      aria-label="Close inline text editor"
-                      className="px-2 py-0.5 rounded bg-[#E5E5E5] hover:bg-[#C0C0C0] text-[#090909] text-[10px] font-semibold cursor-pointer"
-                    >
-                      Done
-                    </button>
-                  </div>
-
-                  {editNode.tspans && editNode.tspans.length > 1 ? (
-                    <div className="space-y-1.5 max-h-44 overflow-y-auto ea-scrollbar">
-                      {editNode.tspans.map((ts, idx) => (
-                        <input
-                          key={ts.id}
-                          type="text"
-                          autoFocus={idx === 0}
-                          aria-label={`Edit line ${idx + 1}`}
-                          value={ts.text}
-                          onChange={(e) =>
-                            onUpdateTextNode(
-                              editNode.id,
-                              { tspanIndex: idx, tspanText: e.target.value },
-                              true
+                  <LiveTextControl
+                    as="textarea"
+                    autoFocus
+                    moveCaretToEndOnMount
+                    nodeKey={editNode.id}
+                    rows={isCurvedPath ? 1 : lineCount}
+                    aria-label={`Edit ${editNode.label} directly on design`}
+                    value={editProps.fullText}
+                    onLiveChange={(nextText) =>
+                      onUpdateTextNode(editNode.id, { text: nextText }, true)
+                    }
+                    onCommitBoundary={onCommitTextBoundary}
+                    onCaretChange={
+                      isCurvedPath
+                        ? (start, end) =>
+                            setTextPathCaret((prev) =>
+                              prev &&
+                              prev.nodeId === editNode.id &&
+                              prev.start === start &&
+                              prev.end === end
+                                ? prev
+                                : { nodeId: editNode.id, start, end }
                             )
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape' || (e.key === 'Enter' && (e.metaKey || e.ctrlKey))) {
-                              e.preventDefault();
-                              setEditingTextId(null);
-                            }
-                          }}
-                          className="w-full h-8 px-2 rounded border border-[#292929] bg-[#0D0D0D] text-xs text-[#F5F5F5] focus:outline-none focus:border-[#E5E5E5]"
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <textarea
-                      autoFocus
-                      rows={editProps.fullText.includes('\n') ? 3 : 2}
-                      aria-label={`Edit ${editNode.label}`}
-                      value={editProps.fullText}
-                      onChange={(e) =>
-                        onUpdateTextNode(editNode.id, { text: e.target.value }, true)
+                        : undefined
+                    }
+                    onBlur={() => {
+                      if (isCurvedPath) setTextPathCaret(null);
+                    }}
+                    onKeyDown={(e) => {
+                      const native = e.nativeEvent as KeyboardEvent;
+                      if (native.isComposing || e.keyCode === 229) return;
+                      if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                        setEditingTextId(null);
+                        setTextPathCaret(null);
+                      } else if (
+                        e.key === 'Enter' &&
+                        ((e.metaKey || e.ctrlKey) ||
+                          isCurvedPath ||
+                          (!e.shiftKey && !editProps.fullText.includes('\n')))
+                      ) {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                        setEditingTextId(null);
+                        setTextPathCaret(null);
                       }
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape') {
-                          e.preventDefault();
-                          setEditingTextId(null);
-                        } else if (
-                          e.key === 'Enter' &&
-                          ((e.metaKey || e.ctrlKey) || (!e.shiftKey && !editProps.fullText.includes('\n')))
-                        ) {
-                          e.preventDefault();
-                          setEditingTextId(null);
-                        }
-                      }}
-                      className="w-full px-2.5 py-1.5 rounded border border-[#292929] bg-[#0D0D0D] text-xs text-[#F5F5F5] focus:outline-none focus:border-[#E5E5E5] resize-y"
-                    />
-                  )}
-                  <p className="text-[10px] text-[#737373]">
-                    Press Enter or click Done to finish
-                  </p>
+                    }}
+                    style={
+                      isCurvedPath
+                        ? {
+                            width: `${editorW}px`,
+                            height: `${editorH}px`,
+                            minHeight: '28px',
+                            fontSize: `${scaledFontSize}px`,
+                            lineHeight: String(lineHeightVal),
+                            color: 'transparent',
+                            backgroundColor: 'transparent',
+                            caretColor: textPathCaretCoords
+                              ? 'transparent'
+                              : editProps.color && editProps.color !== 'none'
+                              ? editProps.color
+                              : '#18181B',
+                            whiteSpace: 'pre',
+                            overflow: 'hidden',
+                          }
+                        : {
+                            width: `${editorW}px`,
+                            height: `${editorH}px`,
+                            minHeight: '28px',
+                            fontFamily: getCssFontFallback(editProps.fontFamily),
+                            fontSize: `${scaledFontSize}px`,
+                            fontWeight: editProps.fontWeight,
+                            fontStyle: editProps.fontStyle,
+                            textDecoration: editProps.textDecoration,
+                            color:
+                              editProps.color && editProps.color !== 'none'
+                                ? editProps.color
+                                : '#111111',
+                            letterSpacing: `${editProps.letterSpacing * scaleX}px`,
+                            lineHeight: String(lineHeightVal),
+                            textAlign:
+                              editProps.textAnchor === 'middle'
+                                ? 'center'
+                                : editProps.textAnchor === 'end'
+                                ? 'right'
+                                : 'left',
+                            transform: editNode.transform.rotation
+                              ? `rotate(${editNode.transform.rotation}deg)`
+                              : undefined,
+                            whiteSpace: 'pre',
+                            overflow: 'hidden',
+                            padding: '1px 10px',
+                          }
+                    }
+                    className={
+                      isCurvedPath
+                        ? 'block w-full bg-transparent border border-dashed border-[#18181B]/45 dark:border-[#E5E5E5]/55 rounded-sm resize-none focus:outline-none p-0'
+                        : 'block bg-transparent border border-dashed border-[#18181B]/75 dark:border-[#E5E5E5]/85 rounded-sm resize-none focus:outline-none focus:border-solid focus:border-[#18181B] dark:focus:border-[#F5F5F5]'
+                    }
+                  />
                 </div>
               );
             })()}
@@ -1252,7 +1667,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
               role="menu"
               onPointerDown={(e) => e.stopPropagation()}
               style={{ left: `${menuLeft}px`, top: `${menuTop}px`, boxShadow: 'var(--ea-shadow-float)' }}
-              className="fixed z-50 w-48 rounded-lg border border-[#292929] bg-[#151515] py-1.5 text-xs text-[#F5F5F5]"
+              className="fixed z-50 w-48 rounded-lg border border-[#E4E4E7] dark:border-[#292929] bg-white dark:bg-[#151515] py-1.5 text-xs text-[#111111] dark:text-[#F5F5F5]"
             >
               {ctxNode ? (
                 <>
@@ -1263,9 +1678,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         setEditingTextId(ctxNode.id);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                     >
-                      <Type className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                      <Type className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                       <span>Edit Text</span>
                     </button>
                   )}
@@ -1276,13 +1691,13 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onDuplicateNodes([ctxNode.id]);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center justify-between cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center justify-between cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-2">
-                        <Plus className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <Plus className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Duplicate</span>
                       </span>
-                      <span className="text-[10px] text-[#737373]">Ctrl+D</span>
+                      <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Ctrl+D</span>
                     </button>
                   )}
                   {onCopyNodes && (
@@ -1292,13 +1707,13 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onCopyNodes([ctxNode.id]);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center justify-between cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center justify-between cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-2">
-                        <Copy className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <Copy className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Copy</span>
                       </span>
-                      <span className="text-[10px] text-[#737373]">Ctrl+C</span>
+                      <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Ctrl+C</span>
                     </button>
                   )}
                   {hasClipboard && onPasteNodes && (
@@ -1308,18 +1723,18 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onPasteNodes();
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center justify-between cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center justify-between cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-2">
-                        <ClipboardPaste className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <ClipboardPaste className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Paste</span>
                       </span>
-                      <span className="text-[10px] text-[#737373]">Ctrl+V</span>
+                      <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Ctrl+V</span>
                     </button>
                   )}
 
                   {!ctxNode.locked && !ctxNode.isBackground && (onFlipNode || onCenterNode) && (
-                    <div className="my-1 border-t border-[#292929]" />
+                    <div className="my-1 border-t border-[#E4E4E7] dark:border-[#292929]" />
                   )}
                   {!ctxNode.locked && !ctxNode.isBackground && onCenterNode && (
                     <button
@@ -1328,9 +1743,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onCenterNode(ctxNode.id);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                     >
-                      <Crosshair className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                      <Crosshair className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                       <span>Center on Canvas</span>
                     </button>
                   )}
@@ -1342,9 +1757,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                           onFlipNode(ctxNode.id, 'x');
                           setContextMenu(null);
                         }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                        className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                       >
-                        <FlipHorizontal2 className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <FlipHorizontal2 className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Flip Horizontal</span>
                       </button>
                       <button
@@ -1353,9 +1768,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                           onFlipNode(ctxNode.id, 'y');
                           setContextMenu(null);
                         }}
-                        className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                        className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                       >
-                        <FlipVertical2 className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <FlipVertical2 className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Flip Vertical</span>
                       </button>
                     </>
@@ -1363,7 +1778,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
 
                   {onReorderNode && (canFwd || canBack) && (
                     <>
-                      <div className="my-1 border-t border-[#292929]" />
+                      <div className="my-1 border-t border-[#E4E4E7] dark:border-[#292929]" />
                       {canFwd && (
                         <>
                           <button
@@ -1372,9 +1787,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                               onReorderNode(ctxNode.id, 'front');
                               setContextMenu(null);
                             }}
-                            className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                            className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                           >
-                            <ChevronsUp className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                            <ChevronsUp className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                             <span>Bring to Front</span>
                           </button>
                           <button
@@ -1383,9 +1798,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                               onReorderNode(ctxNode.id, 'forward');
                               setContextMenu(null);
                             }}
-                            className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                            className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                           >
-                            <ArrowUp className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                            <ArrowUp className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                             <span>Bring Forward</span>
                           </button>
                         </>
@@ -1398,9 +1813,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                               onReorderNode(ctxNode.id, 'backward');
                               setContextMenu(null);
                             }}
-                            className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                            className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                           >
-                            <ArrowDown className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                            <ArrowDown className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                             <span>Send Backward</span>
                           </button>
                           <button
@@ -1409,9 +1824,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                               onReorderNode(ctxNode.id, 'back');
                               setContextMenu(null);
                             }}
-                            className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                            className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                           >
-                            <ChevronsDown className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                            <ChevronsDown className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                             <span>Send to Back</span>
                           </button>
                         </>
@@ -1419,7 +1834,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                     </>
                   )}
 
-                  <div className="my-1 border-t border-[#292929]" />
+                  <div className="my-1 border-t border-[#E4E4E7] dark:border-[#292929]" />
                   {onToggleLock && (
                     <button
                       type="button"
@@ -1427,16 +1842,16 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onToggleLock(ctxNode.id);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                     >
                       {ctxNode.locked ? (
                         <>
-                          <Unlock className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                          <Unlock className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                           <span>Unlock</span>
                         </>
                       ) : (
                         <>
-                          <Lock className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                          <Lock className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                           <span>Lock</span>
                         </>
                       )}
@@ -1449,9 +1864,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onToggleVisibility(ctxNode.id);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center gap-2 cursor-pointer"
                     >
-                      <EyeOff className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                      <EyeOff className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                       <span>Hide</span>
                     </button>
                   )}
@@ -1462,13 +1877,13 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                         onDeleteNodes([ctxNode.id]);
                         setContextMenu(null);
                       }}
-                      className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center justify-between text-[#E5E5E5] cursor-pointer"
+                      className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center justify-between text-[#111111] dark:text-[#E5E5E5] cursor-pointer"
                     >
                       <span className="inline-flex items-center gap-2">
-                        <Trash2 className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                        <Trash2 className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                         <span>Delete</span>
                       </span>
-                      <span className="text-[10px] text-[#737373]">Del</span>
+                      <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Del</span>
                     </button>
                   )}
                 </>
@@ -1481,13 +1896,13 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
                       onPasteNodes();
                       setContextMenu(null);
                     }}
-                    className="w-full px-3 py-1.5 text-left hover:bg-[#252525] flex items-center justify-between cursor-pointer"
+                    className="w-full px-3 py-1.5 text-left hover:bg-[#F4F4F5] dark:hover:bg-[#252525] flex items-center justify-between cursor-pointer"
                   >
                     <span className="inline-flex items-center gap-2">
-                      <ClipboardPaste className="w-3.5 h-3.5 text-[#C0C0C0]" />
+                      <ClipboardPaste className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
                       <span>Paste</span>
                     </span>
-                    <span className="text-[10px] text-[#737373]">Ctrl+V</span>
+                    <span className="text-[10px] text-[#71717A] dark:text-[#737373]">Ctrl+V</span>
                   </button>
                 )
               )}
@@ -1507,7 +1922,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
         data-canvas-toolbar="true"
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
-        className="sticky bottom-3 z-20 cursor-default inline-flex items-center gap-1 px-2 py-1.5 rounded-md border text-xs font-medium mb-2 bg-[#151515] border-[#292929] text-[#F5F5F5]"
+        className="sticky bottom-3 z-20 cursor-default max-w-[calc(100%-16px)] inline-flex flex-wrap items-center justify-center gap-1 px-2 py-1.5 rounded-md border text-xs font-medium mb-2 bg-white dark:bg-[#151515] border-[#E4E4E7] dark:border-[#292929] text-[#111111] dark:text-[#F5F5F5]"
         style={{ boxShadow: 'var(--ea-shadow-float)' }}
       >
         <button
@@ -1521,8 +1936,8 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
           aria-pressed={effectiveToolMode === 'select'}
           className={`w-8 h-8 sm:w-7 sm:h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
             effectiveToolMode === 'select'
-              ? 'bg-[#E5E5E5] text-[#090909]'
-              : 'text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5]'
+              ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+              : 'text-[#52525B] dark:text-[#C0C0C0] hover:bg-[#E4E4E7] dark:hover:bg-[#252525] hover:text-[#111111] dark:hover:text-[#F5F5F5]'
           }`}
         >
           <MousePointer2 className="w-3.5 h-3.5" />
@@ -1536,14 +1951,14 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
           aria-pressed={effectiveToolMode === 'pan'}
           className={`w-8 h-8 sm:w-7 sm:h-7 flex items-center justify-center rounded cursor-pointer transition-colors ${
             effectiveToolMode === 'pan'
-              ? 'bg-[#E5E5E5] text-[#090909]'
-              : 'text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5]'
+              ? 'bg-[#18181B] text-white dark:bg-[#E5E5E5] dark:text-[#090909]'
+              : 'text-[#52525B] dark:text-[#C0C0C0] hover:bg-[#E4E4E7] dark:hover:bg-[#252525] hover:text-[#111111] dark:hover:text-[#F5F5F5]'
           }`}
         >
           <Hand className="w-3.5 h-3.5" />
         </button>
 
-        <span className="w-px h-4 mx-0.5 bg-[#292929]" />
+        <span className="w-px h-4 mx-0.5 bg-[#E4E4E7] dark:bg-[#292929]" />
 
         <button
           type="button"
@@ -1552,9 +1967,9 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
             setZoomPercent((p) => Math.max(25, p - 15));
           }}
           aria-label="Zoom out"
-          className="w-8 h-8 sm:w-7 sm:h-7 flex items-center justify-center rounded hover:bg-[#252525] hover:text-[#F5F5F5] cursor-pointer transition-colors"
+          className="w-8 h-8 sm:w-7 sm:h-7 flex items-center justify-center rounded hover:bg-[#E4E4E7] dark:hover:bg-[#252525] hover:text-[#111111] dark:hover:text-[#F5F5F5] cursor-pointer transition-colors"
         >
-          <Minus className="w-3.5 h-3.5 text-[#C0C0C0]" />
+          <Minus className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
         </button>
 
         <select
@@ -1572,7 +1987,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
               setZoomPercent(Number(val));
             }
           }}
-          className="h-7 px-1.5 rounded bg-[#0D0D0D] border border-[#292929] text-[#F5F5F5] text-xs tabular-nums cursor-pointer focus:outline-none focus:border-[#C0C0C0]"
+          className="h-7 px-1.5 rounded bg-white dark:bg-[#0D0D0D] border border-[#E4E4E7] dark:border-[#292929] text-[#111111] dark:text-[#F5F5F5] text-xs tabular-nums cursor-pointer focus:outline-none focus:border-[#3F3F46] dark:focus:border-[#C0C0C0]"
         >
           <option value="fit">Fit ({Math.round(fitScale * 100)}%)</option>
           {ZOOM_PRESETS.map((pct) => (
@@ -1597,7 +2012,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
             setZoomMode('manual');
             setZoomPercent(Number(e.target.value));
           }}
-          className="hidden sm:block w-20 h-4 accent-[#C0C0C0] cursor-pointer"
+          className="hidden sm:block w-20 h-4 accent-[#18181B] dark:accent-[#C0C0C0] cursor-pointer"
         />
 
         <button
@@ -1607,12 +2022,12 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
             setZoomPercent((p) => Math.min(200, p + 15));
           }}
           aria-label="Zoom in"
-          className="w-8 h-8 sm:w-7 sm:h-7 flex items-center justify-center rounded hover:bg-[#252525] hover:text-[#F5F5F5] cursor-pointer transition-colors"
+          className="w-8 h-8 sm:w-7 sm:h-7 flex items-center justify-center rounded hover:bg-[#E4E4E7] dark:hover:bg-[#252525] hover:text-[#111111] dark:hover:text-[#F5F5F5] cursor-pointer transition-colors"
         >
-          <Plus className="w-3.5 h-3.5 text-[#C0C0C0]" />
+          <Plus className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0]" />
         </button>
 
-        <span className="w-px h-4 mx-0.5 bg-[#292929]" />
+        <span className="w-px h-4 mx-0.5 bg-[#E4E4E7] dark:bg-[#292929]" />
 
         <button
           type="button"
@@ -1624,8 +2039,8 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
           }}
           className={`px-2.5 h-8 sm:h-7 inline-flex items-center gap-1 rounded cursor-pointer whitespace-nowrap transition-colors ${
             zoomMode === 'fit' && panOffset.x === 0 && panOffset.y === 0
-              ? 'bg-[#252525] text-[#E5E5E5]'
-              : 'text-[#999999] hover:bg-[#252525] hover:text-[#F5F5F5]'
+              ? 'bg-[#E4E4E7] text-[#111111] dark:bg-[#252525] dark:text-[#E5E5E5]'
+              : 'text-[#52525B] dark:text-[#999999] hover:bg-[#E4E4E7] dark:hover:bg-[#252525] hover:text-[#111111] dark:hover:text-[#F5F5F5]'
           }`}
         >
           <Maximize2 className="w-3 h-3" />
@@ -1637,7 +2052,7 @@ export const InvitationCanvas: React.FC<InvitationCanvasProps> = ({
             type="button"
             title="Center canvas position"
             onClick={() => setPanOffset({ x: 0, y: 0 })}
-            className="px-2 h-8 sm:h-7 inline-flex items-center gap-1 rounded cursor-pointer whitespace-nowrap text-[#C0C0C0] hover:bg-[#252525] hover:text-[#F5F5F5] transition-colors"
+            className="px-2 h-8 sm:h-7 inline-flex items-center gap-1 rounded cursor-pointer whitespace-nowrap text-[#52525B] dark:text-[#C0C0C0] hover:bg-[#E4E4E7] dark:hover:bg-[#252525] hover:text-[#111111] dark:hover:text-[#F5F5F5] transition-colors"
           >
             <Crosshair className="w-3 h-3" />
             <span className="hidden sm:inline">Center</span>

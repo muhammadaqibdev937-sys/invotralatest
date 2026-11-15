@@ -1,8 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Search, SlidersHorizontal, Type, X } from 'lucide-react';
-import { FontCategory, SUPPORTED_FONT_CATALOG } from '../../engine/fonts';
+import {
+  FontCategory,
+  getUploadedFontEngineEntry,
+  SUPPORTED_FONT_CATALOG,
+} from '../../engine/fonts';
 import { TextEditPatch } from '../../engine/svgScene';
 import { ensureFontsLoaded, getFontDefinition } from '../../services/fontLoader';
+import { usePersistedUploadedFonts } from '../../hooks/usePersistedUploadedFonts';
 
 interface FontFamilyDropdownProps {
   nodeId: string;
@@ -21,7 +26,7 @@ interface FontFamilyDropdownProps {
 type CategoryFilter = 'All' | FontCategory;
 
 function getCssFallback(family: string): string {
-  const cat = getFontDefinition(family)?.category;
+  const cat = getFontDefinition(family)?.category ?? getUploadedFontEngineEntry(family)?.category;
   if (cat === 'Script') return `"${family}", cursive`;
   if (cat === 'Sans') return `"${family}", sans-serif`;
   if (cat === 'Serif') return `"${family}", serif`;
@@ -52,9 +57,30 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
   const [highlightedIdx, setHighlightedIdx] = useState<number>(-1);
   const [fontsLoadedTick, setFontsLoadedTick] = useState(0);
 
+  const { uploadedFonts, fontRegistryVersion } = usePersistedUploadedFonts({
+    hydrateOnMount: false,
+  });
+
   const filteredEntries = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return SUPPORTED_FONT_CATALOG.filter((entry) => {
+    const uploadedEntries = uploadedFonts.map((rec) => ({
+      family: rec.family,
+      category: rec.category,
+      styleCategories: ['Saved Custom Font'] as unknown as string[],
+      pairingTags: ['uploaded', 'custom', 'saved'],
+      samplePhrase: 'Saved Custom Font',
+    }));
+    const combined = [
+      ...uploadedEntries,
+      ...SUPPORTED_FONT_CATALOG.map((entry) => ({
+        family: entry.family,
+        category: entry.category,
+        styleCategories: entry.styleCategories as unknown as string[],
+        pairingTags: entry.pairingTags,
+        samplePhrase: entry.samplePhrase,
+      })),
+    ];
+    return combined.filter((entry) => {
       if (categoryFilter !== 'All' && entry.category !== categoryFilter) {
         return false;
       }
@@ -66,7 +92,7 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
         entry.pairingTags.some((t) => t.toLowerCase().includes(q))
       );
     });
-  }, [categoryFilter, searchQuery]);
+  }, [categoryFilter, searchQuery, isOpen, uploadedFonts, fontRegistryVersion]);
 
   useEffect(() => {
     const def = getFontDefinition(currentFontFamily);
@@ -154,10 +180,12 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
     setHighlightedIdx(-1);
     setIsOpen(false);
 
-    try {
-      await ensureFontsLoaded([{ family, weight: '400', style: 'normal' }]);
-    } catch {
-      // Proceed even if already loaded
+    if (getFontDefinition(family)) {
+      try {
+        await ensureFontsLoaded([{ family, weight: '400', style: 'normal' }]);
+      } catch {
+        // Proceed even if already loaded
+      }
     }
 
     const meta = getFontDefinition(family);
@@ -229,59 +257,59 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
           compact ? 'min-h-[32px] px-2.5 text-xs' : 'min-h-[32px] px-3 text-xs'
         } rounded-md border inline-flex items-center gap-2 cursor-pointer transition-colors shrink-0 ${
           isOpen
-            ? 'bg-[#252525] border-[#E5E5E5] text-[#F5F5F5]'
-            : 'bg-[#151515] border-[#292929] text-[#E5E5E5] hover:bg-[#252525] hover:border-[#C0C0C0]'
+            ? 'bg-[#E4E4E7] border-[#18181B] text-[#111111] dark:bg-[#252525] dark:border-[#E5E5E5] dark:text-[#F5F5F5]'
+            : 'bg-[#FAFAFA] border-[#E4E4E7] text-[#111111] hover:bg-[#E4E4E7] hover:border-[#A1A1AA] dark:bg-[#151515] dark:border-[#292929] dark:text-[#E5E5E5] dark:hover:bg-[#252525] dark:hover:border-[#C0C0C0]'
         }`}
       >
-        <Type className="w-3.5 h-3.5 text-[#C0C0C0] shrink-0" />
+        <Type className="w-3.5 h-3.5 text-[#52525B] dark:text-[#C0C0C0] shrink-0" />
         <span
-          className="truncate max-w-[140px] sm:max-w-[190px] text-sm leading-none py-0.5 text-[#F5F5F5]"
+          className="truncate max-w-[140px] sm:max-w-[190px] text-sm leading-none py-0.5 text-[#111111] dark:text-[#F5F5F5]"
           style={{ fontFamily: getCssFallback(effectiveDisplayFamily) }}
         >
           {effectiveDisplayFamily}
         </span>
         {effectiveMeta && !compact && (
-          <span className="text-[10px] text-[#737373] shrink-0 hidden sm:inline">
+          <span className="text-[10px] text-[#71717A] dark:text-[#737373] shrink-0 hidden sm:inline">
             {effectiveMeta.category}
           </span>
         )}
         <ChevronDown
-          className={`w-3.5 h-3.5 text-[#999999] shrink-0 transition-transform duration-150 ${
-            isOpen ? 'rotate-180 text-[#E5E5E5]' : ''
+          className={`w-3.5 h-3.5 text-[#52525B] dark:text-[#999999] shrink-0 transition-transform duration-150 ${
+            isOpen ? 'rotate-180 text-[#111111] dark:text-[#E5E5E5]' : ''
           }`}
         />
       </button>
 
       {isOpen && (
         <div
-          className={`absolute top-full mt-1.5 z-50 w-[308px] sm:w-[368px] rounded-lg border border-[#292929] bg-[#151515] text-[#F5F5F5] overflow-hidden ${
+          className={`absolute top-full mt-1.5 z-50 w-[308px] sm:w-[368px] rounded-lg border border-[#E4E4E7] bg-white text-[#111111] dark:border-[#292929] dark:bg-[#151515] dark:text-[#F5F5F5] overflow-hidden ${
             align === 'right' ? 'right-0' : 'left-0'
           }`}
           style={{ boxShadow: 'var(--ea-shadow-paper)' }}
         >
-          <div className="px-3.5 py-2.5 border-b border-[#292929] bg-[#101010] space-y-0.5">
-            <div className="flex items-center justify-between gap-2 text-[10px] uppercase tracking-wider text-[#999999]">
+          <div className="px-3.5 py-2.5 border-b border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#101010] space-y-0.5">
+            <div className="flex items-center justify-between gap-2 text-[10px] uppercase tracking-wider text-[#52525B] dark:text-[#999999]">
               <span>
                 {previewFamily && previewFamily !== currentFontFamily
                   ? 'Live Hover Preview'
                   : 'Active Font Preview'}
               </span>
-              <span className="normal-case tracking-normal text-[#C0C0C0] truncate max-w-[170px]">
+              <span className="normal-case tracking-normal text-[#3F3F46] dark:text-[#C0C0C0] truncate max-w-[170px]">
                 {effectiveDisplayFamily}
                 {effectiveMeta ? ` · ${effectiveMeta.category}` : ''}
               </span>
             </div>
             <div
-              className="text-xl leading-snug text-[#F5F5F5] truncate pt-0.5"
+              className="text-xl leading-snug text-[#111111] dark:text-[#F5F5F5] truncate pt-0.5"
               style={{ fontFamily: getCssFallback(effectiveDisplayFamily) }}
             >
               {sampleTextSnippet}
             </div>
           </div>
 
-          <div className="p-2.5 border-b border-[#292929] bg-[#101010] space-y-2">
+          <div className="p-2.5 border-b border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#101010] space-y-2">
             <div className="relative">
-              <Search className="w-3.5 h-3.5 text-[#737373] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-3.5 h-3.5 text-[#71717A] dark:text-[#737373] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 ref={searchInputRef}
                 type="search"
@@ -292,14 +320,14 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
                   setHighlightedIdx(-1);
                 }}
                 placeholder="Search font family or style..."
-                className="w-full h-8 pl-8 pr-7 rounded border border-[#292929] bg-[#0D0D0D] text-xs text-[#F5F5F5] placeholder:text-[#737373] focus:outline-none focus:border-[#C0C0C0]"
+                className="w-full h-8 pl-8 pr-7 rounded border border-[#E4E4E7] bg-white text-xs text-[#111111] placeholder:text-[#71717A] focus:outline-none focus:border-[#3F3F46] dark:border-[#292929] dark:bg-[#0D0D0D] dark:text-[#F5F5F5] dark:placeholder:text-[#737373] dark:focus:border-[#C0C0C0]"
               />
               {searchQuery && (
                 <button
                   type="button"
                   onClick={() => setSearchQuery('')}
                   aria-label="Clear font search"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#999999] hover:text-[#F5F5F5] cursor-pointer"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#52525B] hover:text-[#111111] dark:text-[#999999] dark:hover:text-[#F5F5F5] cursor-pointer"
                 >
                   <X className="w-3.5 h-3.5" />
                 </button>
@@ -319,8 +347,8 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
                     }}
                     className={`h-7 rounded text-[11px] font-medium cursor-pointer border transition-colors ${
                       active
-                        ? 'bg-[#E5E5E5] text-[#090909] border-[#E5E5E5]'
-                        : 'bg-[#151515] text-[#999999] border-[#292929] hover:bg-[#252525] hover:text-[#F5F5F5]'
+                        ? 'bg-[#18181B] text-white border-[#18181B] dark:bg-[#E5E5E5] dark:text-[#090909] dark:border-[#E5E5E5]'
+                        : 'bg-white text-[#52525B] border-[#E4E4E7] hover:bg-[#E4E4E7] hover:text-[#111111] dark:bg-[#151515] dark:text-[#999999] dark:border-[#292929] dark:hover:bg-[#252525] dark:hover:text-[#F5F5F5]'
                     }`}
                   >
                     {cat}
@@ -333,14 +361,14 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
           <div
             role="listbox"
             aria-label="Font families with live preview"
-            className="max-h-[264px] overflow-y-auto ea-scrollbar divide-y divide-[#292929]/60"
+            className="max-h-[264px] overflow-y-auto ea-scrollbar divide-y divide-[#E4E4E7] dark:divide-[#292929]/60"
             onMouseLeave={() => {
               setPreviewFamily(null);
               onPreviewFont?.(nodeId, null);
             }}
           >
             {filteredEntries.length === 0 ? (
-              <div className="p-4 text-center text-xs text-[#999999]">
+              <div className="p-4 text-center text-xs text-[#52525B] dark:text-[#999999]">
                 No fonts match “{searchQuery}”.
               </div>
             ) : (
@@ -365,33 +393,33 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
                     onClick={() => void applyFontChoice(entry.family)}
                     className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-3 text-left cursor-pointer transition-colors ${
                       isSelected
-                        ? 'bg-[#252525] text-[#F5F5F5]'
+                        ? 'bg-[#E4E4E7] text-[#111111] dark:bg-[#252525] dark:text-[#F5F5F5]'
                         : isHighlighted
-                        ? 'bg-[#1F1F1F] text-[#F5F5F5]'
-                        : 'bg-transparent text-[#F5F5F5] hover:bg-[#1F1F1F]'
+                        ? 'bg-[#F4F4F5] text-[#111111] dark:bg-[#1F1F1F] dark:text-[#F5F5F5]'
+                        : 'bg-transparent text-[#111111] hover:bg-[#F4F4F5] dark:text-[#F5F5F5] dark:hover:bg-[#1F1F1F]'
                     }`}
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
                         <span
-                          className="text-sm font-medium text-[#F5F5F5] truncate"
+                          className="text-sm font-medium text-[#111111] dark:text-[#F5F5F5] truncate"
                           style={{ fontFamily: getCssFallback(entry.family) }}
                         >
                           {entry.family}
                         </span>
-                        <span className="text-[10px] text-[#737373] shrink-0">
+                        <span className="text-[10px] text-[#71717A] dark:text-[#737373] shrink-0">
                           {entry.styleCategories.slice(0, 2).join(' · ')}
                         </span>
                       </div>
                       <div
-                        className="text-base leading-snug text-[#C0C0C0] truncate mt-0.5"
+                        className="text-base leading-snug text-[#3F3F46] dark:text-[#C0C0C0] truncate mt-0.5"
                         style={{ fontFamily: getCssFallback(entry.family) }}
                       >
                         {rowSpecimen}
                       </div>
                     </div>
 
-                    {isSelected && <Check className="w-4 h-4 text-[#E5E5E5] shrink-0" />}
+                    {isSelected && <Check className="w-4 h-4 text-[#111111] dark:text-[#E5E5E5] shrink-0" />}
                   </button>
                 );
               })
@@ -399,14 +427,14 @@ export const FontFamilyDropdown: React.FC<FontFamilyDropdownProps> = ({
           </div>
 
           {onOpenFullStudio && (
-            <div className="p-2 border-t border-[#292929] bg-[#101010]">
+            <div className="p-2 border-t border-[#E4E4E7] bg-[#FAFAFA] dark:border-[#292929] dark:bg-[#101010]">
               <button
                 type="button"
                 onClick={() => {
                   closeAndClearPreview();
                   onOpenFullStudio();
                 }}
-                className="w-full h-8 px-2.5 rounded flex items-center justify-center gap-1.5 text-[11px] font-medium text-[#C0C0C0] hover:text-[#F5F5F5] hover:bg-[#252525] cursor-pointer transition-colors"
+                className="w-full h-8 px-2.5 rounded flex items-center justify-center gap-1.5 text-[11px] font-medium text-[#3F3F46] hover:text-[#111111] hover:bg-[#E4E4E7] dark:text-[#C0C0C0] dark:hover:text-[#F5F5F5] dark:hover:bg-[#252525] cursor-pointer transition-colors"
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
                 <span>Pairings, Weights &amp; Fine Studio</span>

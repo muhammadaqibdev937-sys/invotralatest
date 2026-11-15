@@ -1,4 +1,30 @@
-:root,
+:root {
+  color-scheme: light;
+  --ea-bg-main: #F4F4F5;
+  --ea-bg-secondary: #FFFFFF;
+  --ea-bg-surface: #FAFAFA;
+  --ea-bg-input: #FFFFFF;
+  --ea-bg-workspace: #ECECEE;
+  --ea-text-primary: #111111;
+  --ea-text-secondary: #52525B;
+  --ea-text-muted: #71717A;
+  --ea-accent: #3F3F46;
+  --ea-accent-hover: #E4E4E7;
+  --ea-accent-active: #18181B;
+  --ea-accent-contrast: #FFFFFF;
+  --ea-accent-soft: #E4E4E7;
+  --ea-border: #E4E4E7;
+  --ea-border-strong: #D4D4D8;
+  --ea-success: #18181B;
+  --ea-success-soft: #E4E4E7;
+  --ea-error: #18181B;
+  --ea-error-soft: #FAFAFA;
+  --ea-notice: #3F3F46;
+  --ea-notice-soft: #FAFAFA;
+  --ea-shadow-paper: 0 20px 48px -12px rgba(0, 0, 0, 0.14), 0 4px 16px -4px rgba(0, 0, 0, 0.08);
+  --ea-shadow-float: 0 10px 28px -6px rgba(0, 0, 0, 0.14), 0 2px 8px -2px rgba(0, 0, 0, 0.08);
+}
+
 .dark {
   color-scheme: dark;
   --ea-bg-main: #090909;

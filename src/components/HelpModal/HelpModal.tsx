@@ -15,7 +15,7 @@ const STEPS = [
   {
     number: '2',
     title: 'Customize text, backgrounds, shapes & images',
-    body: 'Double-click any text right on the canvas to edit it in place, or click any element to adjust fonts, size, text case, flip, rotate, layer order, and styling in the right-hand Properties Inspector. Right-click elements for quick actions.',
+    body: 'Click any text right on the canvas to edit it directly in place (or use the left-side Text panel), and click any element to adjust fonts, size, text case, flip, rotate, layer order, and styling in the right-hand Properties Inspector.',
   },
   {
     number: '3',
@@ -34,18 +34,18 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-[#090909]/80 backdrop-blur-[2px]"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-black/50 dark:bg-[#090909]/80 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
       aria-labelledby="help-modal-title"
     >
       <div
-        className="w-full max-w-lg rounded-lg border overflow-hidden max-h-[90vh] flex flex-col bg-[#151515] border-[#292929] text-[#F5F5F5]"
+        className="w-full max-w-lg rounded-lg border overflow-hidden max-h-[90vh] flex flex-col bg-white border-[#E4E4E7] text-[#111111] dark:bg-[#151515] dark:border-[#292929] dark:text-[#F5F5F5]"
         style={{ boxShadow: 'var(--ea-shadow-paper)' }}
       >
-        <div className="px-6 py-4 border-b border-[#292929] flex items-center justify-between">
+        <div className="px-6 py-4 border-b border-[#E4E4E7] dark:border-[#292929] flex items-center justify-between">
           <span
-            className="text-lg font-medium text-[#F5F5F5]"
+            className="text-lg font-medium text-[#111111] dark:text-[#F5F5F5]"
             style={{ fontFamily: '"Cormorant Garamond", serif' }}
           >
             How to Upload, Edit &amp; Export SVG
@@ -54,7 +54,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
             type="button"
             onClick={onClose}
             aria-label="Close help modal"
-            className="w-9 h-9 rounded-md flex items-center justify-center cursor-pointer text-[#999999] hover:text-[#F5F5F5] hover:bg-[#252525] transition-colors"
+            className="w-9 h-9 rounded-md flex items-center justify-center cursor-pointer text-[#52525B] hover:text-[#111111] hover:bg-[#E4E4E7] dark:text-[#999999] dark:hover:text-[#F5F5F5] dark:hover:bg-[#252525] transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
@@ -63,7 +63,7 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
         <div className="p-6 space-y-5 overflow-y-auto ea-scrollbar">
           <h2
             id="help-modal-title"
-            className="text-2xl font-medium tracking-tight text-[#F5F5F5]"
+            className="text-2xl font-medium tracking-tight text-[#111111] dark:text-[#F5F5F5]"
             style={{ fontFamily: '"Cormorant Garamond", serif' }}
           >
             Four Simple Steps
@@ -72,14 +72,14 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
           <ol className="space-y-4">
             {STEPS.map((step) => (
               <li key={step.number} className="flex items-start gap-3.5">
-                <span className="w-7 h-7 rounded-full border flex items-center justify-center text-xs font-semibold shrink-0 mt-0.5 tabular-nums bg-[#252525] border-[#C0C0C0]/50 text-[#E5E5E5]">
+                <span className="w-7 h-7 rounded-full border flex items-center justify-center text-xs font-semibold shrink-0 mt-0.5 tabular-nums bg-[#F4F4F5] border-[#D4D4D8] text-[#111111] dark:bg-[#252525] dark:border-[#C0C0C0]/50 dark:text-[#E5E5E5]">
                   {step.number}
                 </span>
                 <div>
-                  <h3 className="text-sm font-medium text-[#F5F5F5]">
+                  <h3 className="text-sm font-medium text-[#111111] dark:text-[#F5F5F5]">
                     {step.title}
                   </h3>
-                  <p className="text-xs leading-relaxed mt-1 text-[#999999]">
+                  <p className="text-xs leading-relaxed mt-1 text-[#52525B] dark:text-[#999999]">
                     {step.body}
                   </p>
                 </div>
@@ -87,13 +87,13 @@ export const HelpModal: React.FC<HelpModalProps> = ({ isOpen, onClose }) => {
             ))}
           </ol>
 
-          <div className="p-4 rounded-md border text-xs space-y-1 bg-[#0D0D0D] border-[#292929] text-[#999999]">
-            <p className="font-medium text-[#F5F5F5]">
+          <div className="p-4 rounded-md border text-xs space-y-1 bg-[#FAFAFA] border-[#E4E4E7] text-[#52525B] dark:bg-[#0D0D0D] dark:border-[#292929] dark:text-[#999999]">
+            <p className="font-medium text-[#111111] dark:text-[#F5F5F5]">
               Private Browser-Only SVG Editing
             </p>
             <p className="leading-relaxed">
               Your SVG files and edits stay strictly inside your browser on this device with automatic
-              local autosave. Use <strong className="text-[#E5E5E5]">Delete</strong> anytime to clear
+              local autosave. Use <strong className="text-[#111111] dark:text-[#E5E5E5]">Delete</strong> anytime to clear
               the current design and upload a new SVG.
             </p>
           </div>

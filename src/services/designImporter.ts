@@ -4,6 +4,7 @@ import {
   getSceneStats,
   getTextNodeProperties,
   parseSvgToScene,
+  scanSceneFontUsage,
 } from '../engine/svgScene';
 import { ensureFontsLoaded, getFontDefinition } from './fontLoader';
 
@@ -238,11 +239,18 @@ export async function importSvgDesignFile(
   }
 
   report(88, 'Loading typography...');
+  const fontSummary = scanSceneFontUsage(scene);
+  if (fontSummary.missingCount > 0) {
+    console.warn(`[designImporter] Font scan for "${file.name}": ${fontSummary.summaryText}`);
+  }
+
   const textEntries = collectTextNodesWithAncestors(scene.nodes);
   const fontReqs: Array<{ family: string; weight: string; style: 'normal' | 'italic' }> = [];
   for (const { node, ancestors } of textEntries) {
     const props = getTextNodeProperties(node, scene.cssRules, ancestors);
-    const def = getFontDefinition(props.fontFamily);
+    const def =
+      getFontDefinition(props.fontFamily) ??
+      (props.isFontFallback ? getFontDefinition(props.fallbackPreviewFamily) : undefined);
     if (def) {
       fontReqs.push({
         family: def.family,
@@ -252,7 +260,9 @@ export async function importSvgDesignFile(
     }
   }
   if (fontReqs.length > 0) {
-    await ensureFontsLoaded(fontReqs).catch(() => {});
+    await ensureFontsLoaded(fontReqs).catch((err) => {
+      console.warn('[designImporter] Font preload warning:', err);
+    });
   }
 
   report(100, 'Ready');
@@ -273,6 +283,7 @@ export async function importSvgDesignFile(
       groupCount: stats.groupCount,
       imageCount: stats.imageCount,
       warnings: scene.warnings,
+      fontSummary,
     },
   };
 }

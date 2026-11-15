@@ -15,8 +15,22 @@
       property="og:description"
       content="Upload your Etsy editable SVG design, customize real vector text, fonts, shapes, colors, and layers directly in your browser, and download your editable SVG."
     />
+    <script>
+      (function () {
+        try {
+          var saved = window.localStorage.getItem('invitora:theme');
+          if (saved === 'light') {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.style.colorScheme = 'light';
+          } else {
+            document.documentElement.classList.add('dark');
+            document.documentElement.style.colorScheme = 'dark';
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#090909] text-[#F5F5F5]">
+  <body class="bg-[#F4F4F5] text-[#111111] dark:bg-[#090909] dark:text-[#F5F5F5]">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
